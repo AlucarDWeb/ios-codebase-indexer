@@ -511,8 +511,16 @@ def cmd_viz(a):
         cov = sum(1 for f in tracked if f in have)
         data["meta"]["coverage_pct"] = round(100 * cov / len(tracked), 1) if tracked else None
         data["meta"]["coverage"] = f"{cov}/{len(tracked)}"
-    out = os.path.expanduser(a.out or f"~/.cache/indexstore-graph/{m.get('project','graph')}-explorer.html")
+    # Derive the default from the database path, the same way build.py does, so viz and a
+    # build cannot write two different explorer files for one project.
+    db_file = db_path(a.db)
+    default_out = os.path.join(os.path.dirname(db_file),
+                               os.path.basename(db_file).replace(".db", "-explorer.html"))
+    out = os.path.expanduser(a.out) if a.out else default_out
     viz.render(data, out, title=a.title)
+    if not a.out and root:
+        entry = prj.load_registry().get(root, {})
+        prj.register(root, entry.get("db", db_file), entry.get("stores") or [], {"html": out})
     print(f"wrote {out}  ({os.path.getsize(out)/1e6:.1f} MB)")
     print(f"nodes: {len(data['nodes']):,} (slice {data['slice_size']:,})  edges: {len(data['edges']):,}")
     if a.open:
