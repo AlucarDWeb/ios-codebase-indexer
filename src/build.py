@@ -1,5 +1,5 @@
 """Build a queryable SQLite graph from a Swift/clang index store."""
-import argparse, hashlib, json, os, sqlite3, subprocess, sys, time
+import argparse, atexit, hashlib, json, os, shutil, sqlite3, subprocess, sys, time
 from ctypes import c_uint, c_void_p, byref
 from concurrent.futures import ProcessPoolExecutor
 
@@ -230,6 +230,30 @@ def normalize(path, root, prefix_map):
     return p, None, 0
 
 
+def _pid_alive(who):
+    """True when the lock's `pid N` still names a running process."""
+    try:
+        pid = int(who.split()[-1])
+        os.kill(pid, 0)
+        return True
+    except (ValueError, IndexError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
+
+
+def _release(lock, shard_dir):
+    if os.path.isdir(shard_dir):
+        shutil.rmtree(shard_dir, ignore_errors=True)
+    try:
+        with open(lock) as f:
+            mine = f.read().strip() == f"pid {os.getpid()}"
+    except OSError:
+        return
+    if mine:
+        os.remove(lock)
+
+
 def _manifest(root, cfg):
     m = cfg.get("docs_manifest") or ""
     if not m:
@@ -273,10 +297,10 @@ def main():
     jobs = args.jobs or cfg.get("jobs", 4)
     lock = final_db + ".lock"
     if os.path.exists(lock):
+        with open(lock) as f:
+            who = f.read().strip()
         age = time.time() - os.path.getmtime(lock)
-        if age < 7200:
-            with open(lock) as f:
-                who = f.read().strip()
+        if _pid_alive(who) and age < 7200:
             raise SystemExit(f"another index build is running for this project "
                              f"({who}, {int(age)}s ago). Wait for it, or remove {lock}")
         os.remove(lock)
@@ -284,6 +308,9 @@ def main():
         f.write(f"pid {os.getpid()}")
 
     shard_dir = db_path + ".shards"
+    # Whatever ends this process, short of SIGKILL, must release the lock and drop the
+    # shards, or the next build refuses to start for two hours.
+    atexit.register(_release, lock, shard_dir)
     os.makedirs(shard_dir, exist_ok=True)
     for f in os.listdir(shard_dir):
         os.remove(os.path.join(shard_dir, f))
