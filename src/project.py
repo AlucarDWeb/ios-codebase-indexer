@@ -1,5 +1,5 @@
 """Project registry, store detection and staleness for ios-codebase-indexer."""
-import hashlib, json, os, subprocess, time
+import hashlib, json, os, plistlib, subprocess, time
 
 CONFIG_DIR = os.path.expanduser("~/.config/ios-codebase-indexer")
 CACHE_DIR = os.path.expanduser("~/.cache/indexstore-graph")
@@ -209,7 +209,45 @@ def detect_stores(root):
         bazel_out = os.path.join(root, "bazel-out", "_global_index_store")
         if os.path.isdir(bazel_out):
             found.append(bazel_out)
+    for store in derived_data_stores(root):
+        if store not in found:
+            found.append(store)
     return found, pm
+
+
+def derived_data_stores(root, derived_data=None):
+    """Index stores Xcode wrote for this project.
+
+    xcodebuild and Xcode index while building by default, into
+    <DerivedData>/<Project>-<hash>/Index.noindex/DataStore. Each build directory records
+    the workspace it belongs to in info.plist, which is what ties a store to this root.
+    """
+    base = derived_data or os.path.expanduser("~/Library/Developer/Xcode/DerivedData")
+    if not os.path.isdir(base):
+        return []
+    root = os.path.realpath(root).rstrip("/")
+    out = []
+    for name in sorted(os.listdir(base)):
+        d = os.path.join(base, name)
+        store = os.path.join(d, "Index.noindex", "DataStore")
+        if not os.path.isdir(store):
+            store = os.path.join(d, "Index", "DataStore")   # Xcode 12 and earlier
+            if not os.path.isdir(store):
+                continue
+        workspace = None
+        info = os.path.join(d, "info.plist")
+        if os.path.exists(info):
+            try:
+                with open(info, "rb") as f:
+                    workspace = (plistlib.load(f) or {}).get("WorkspacePath")
+            except (OSError, ValueError, plistlib.InvalidFileException):
+                workspace = None
+        if not workspace:
+            continue
+        ws = os.path.realpath(workspace)
+        if ws == root or ws.startswith(root + "/"):
+            out.append(store)
+    return out
 
 
 def store_signature(stores):

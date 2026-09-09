@@ -244,6 +244,8 @@ def cache_summary(db_arg, counts, per_kind, tracked, covered):
     """
     try:
         w = sqlite3.connect(db_path(db_arg))
+        # No WAL: a lingering journal beside the database breaks the build's atomic swap.
+        w.execute("PRAGMA journal_mode=DELETE")
         with w:
             for name, value in counts.items():
                 w.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (f"count_{name}", str(value)))
@@ -253,6 +255,7 @@ def cache_summary(db_arg, counts, per_kind, tracked, covered):
             if tracked:
                 w.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("coverage_tracked", str(tracked)))
                 w.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("coverage_covered", str(covered)))
+        w.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         w.close()
     except sqlite3.Error:
         pass

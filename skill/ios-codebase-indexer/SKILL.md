@@ -52,10 +52,14 @@ idxg-build --jobs 8                     # from the repo root
 idxg-build --store <path> --store <path2> --root <repo> --db <path>
 ```
 
-Stores are auto-detected and merged: sourcekit-lsp's background index
+Stores are auto-detected and merged: Xcode and xcodebuild's
+`DerivedData/<Project>-<hash>/Index.noindex/DataStore` (matched to the project by the
+`WorkspacePath` in its `info.plist`), sourcekit-lsp's background index
 (`.index-build/index`, `~/.sourcekit-lsp/index-build`), a sourcekit-bazel-bsp store, and
 the plain bazel build's `_global_index_store` when
-`--features=swift.index_while_building` is on. The database lands at
+`--features=swift.index_while_building` is on. Xcode indexes Objective-C by default,
+which the Bazel Swift rules do not, so an Xcode build is the cheapest way to get `.m`
+coverage. The database lands at
 `~/.cache/indexstore-graph/<repo-dir-name>.db` and `idxg` resolves it from the current
 directory's name.
 

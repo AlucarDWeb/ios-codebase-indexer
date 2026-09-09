@@ -137,13 +137,24 @@ candidates unless you pass `--first`.
 
 | Source | Path |
 |---|---|
+| Xcode and `xcodebuild` | `~/Library/Developer/Xcode/DerivedData/<Project>-<hash>/Index.noindex/DataStore` |
 | sourcekit-lsp background indexing (SwiftPM, plain projects) | `.index-build/index`, `~/.sourcekit-lsp/index-build` |
 | sourcekit-bazel-bsp | `<output_base>/sourcekit-bazel-bsp/execroot/_main/bazel-out/_global_index_store` |
 | bazel with `--features=swift.index_while_building` | `<output_base>/execroot/_main/bazel-out/_global_index_store` |
 
-Bazel paths are read from `.sourcekit-lsp/config.json`'s `index.indexPrefixMap`. Pass
-`--store <path>` (repeatable) to override. On a large monorepo (~570k symbols, 4.9M
-edges) a full build takes about 160 seconds and produces a ~1.5 GB database.
+Every store found is merged, and records dedupe by name, so a project built two ways
+gets the union. Bazel paths come from `.sourcekit-lsp/config.json`'s
+`index.indexPrefixMap`; DerivedData directories are matched to the project by the
+`WorkspacePath` in their `info.plist`. Pass `--store <path>` (repeatable) to override.
+
+**Xcode and xcodebuild need no setup.** Both index while building by default
+(`COMPILER_INDEX_STORE_ENABLE`), and unlike the Bazel Swift rules they index
+Objective-C too, so an Xcode-built project gets `.m` files and even IB outlet
+relationships for free. `xcodebuild -scheme MyApp build` followed by `idxg init` is the
+whole flow for a non-Bazel project.
+
+On a large monorepo (~790k symbols, 6.9M edges from four stores) a full build takes
+about 220 seconds and produces a ~2.2 GB database.
 
 ## What you get
 

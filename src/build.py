@@ -262,6 +262,18 @@ def main():
     # for the whole build instead of an empty one.
     db_path = final_db + ".building"
     jobs = args.jobs or cfg.get("jobs", 4)
+    lock = final_db + ".lock"
+    if os.path.exists(lock):
+        age = time.time() - os.path.getmtime(lock)
+        if age < 7200:
+            with open(lock) as f:
+                who = f.read().strip()
+            raise SystemExit(f"another index build is running for this project "
+                             f"({who}, {int(age)}s ago). Wait for it, or remove {lock}")
+        os.remove(lock)
+    with open(lock, "w") as f:
+        f.write(f"pid {os.getpid()}")
+
     shard_dir = db_path + ".shards"
     os.makedirs(shard_dir, exist_ok=True)
     for f in os.listdir(shard_dir):
@@ -424,10 +436,14 @@ def main():
                    "SELECT kind, COUNT(*) FROM edges GROUP BY kind ORDER BY 2 DESC").fetchall()))))
     db.commit()
     db.close()
-    for suffix in ("-wal", "-shm"):
-        leftover = db_path + suffix
-        if os.path.exists(leftover):
-            os.remove(leftover)
+    # Both sides of the swap: the scratch file's journals, and the destination's, which a
+    # reader may have left behind in WAL mode. Applying a stale WAL to a fresh database
+    # reads back as "database disk image is malformed".
+    for target in (db_path, final_db):
+        for suffix in ("-wal", "-shm"):
+            leftover = target + suffix
+            if os.path.exists(leftover):
+                os.remove(leftover)
     os.replace(db_path, final_db)
     db_path = final_db
     prj.register(root, db_path, stores, {"symbols": stats["symbols"], "edges": stats["edges"]})
@@ -450,6 +466,8 @@ def main():
     for f in os.listdir(shard_dir):
         os.remove(os.path.join(shard_dir, f))
     os.rmdir(shard_dir)
+    if os.path.exists(lock):
+        os.remove(lock)
 
 
 if __name__ == "__main__":
