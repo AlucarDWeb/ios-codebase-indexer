@@ -79,7 +79,7 @@ def _path_layer(rel, depth=2):
 
 
 def slice_data(db, scope=None, limit=3000, edge_cap=60000, per_node_cap=45, detail_cap=12,
-               dead_cap=600):
+               dead_cap=600, file_cap=10):
     cur = db.cursor()
     cur.row_factory = None
     meta = {r[0]: r[1] for r in cur.execute("SELECT key, value FROM meta")}
@@ -122,6 +122,7 @@ def slice_data(db, scope=None, limit=3000, edge_cap=60000, per_node_cap=45, deta
                        key=lambda m: -size_by_mod.get(m, 0))[:45])
     wanted = {(a, b) for a, b, n in mod_edges if a in shown and b in shown and n >= 8}
     mod_edge_details = {}
+    mod_edge_files = {}
     if wanted:
         rows = cur.execute("""SELECT a.module, b.module, a.name, b.name, COUNT(*) n,
                                      MIN(e.path_hash), MIN(e.line)
@@ -140,6 +141,23 @@ def slice_data(db, scope=None, limit=3000, edge_cap=60000, per_node_cap=45, deta
             if len(bucket) >= detail_cap:
                 continue
             bucket.append([caller, callee, relpath(ph) if ph else "", line or 0, n])
+
+        file_rows = cur.execute("""SELECT a.module, b.module, e.path_hash, COUNT(*) n
+                                   FROM edges e
+                                   JOIN symbols a ON a.usr_hash = e.src
+                                   JOIN symbols b ON b.usr_hash = e.dst
+                                   WHERE e.kind='CALLS' AND a.in_repo=1 AND b.in_repo=1
+                                     AND a.module IS NOT NULL AND b.module IS NOT NULL
+                                     AND a.module <> b.module
+                                   GROUP BY a.module, b.module, e.path_hash
+                                   ORDER BY 1, 2, 4 DESC""").fetchall()
+        for am, bm, ph, n in file_rows:
+            if (am, bm) not in wanted:
+                continue
+            bucket = mod_edge_files.setdefault(f"{am}>{bm}", [])
+            if len(bucket) >= file_cap:
+                continue
+            bucket.append([relpath(ph) if ph else "(unknown)", n])
 
     where = "s.in_repo = 1"
     args = []
@@ -216,6 +234,7 @@ def slice_data(db, scope=None, limit=3000, edge_cap=60000, per_node_cap=45, deta
             "dead": dead, "dead_total": total_dead,
             "layers": layers, "modules": modules, "mod_edges": mod_edges,
             "mod_edge_details": mod_edge_details,
+            "mod_edge_files": mod_edge_files,
             "nodes": nodes, "edges": edges, "slice_size": len(ids), "scope": scope or "repo"}
 
 
@@ -424,7 +443,10 @@ function selectModule(i) {
     kv.append(el('div', null, k), el('div', null, v));
   }
   info.append(kv);
-  const g = el('div', 'grid2');
+  // Stacked, not side by side: call-site paths are wide and a two-column grid clipped them.
+  const g = el('div');
+  g.style.display = 'grid';
+  g.style.gap = '16px';
   g.append(modTree(`callers (inbound)`, ins, l => l.s, 'var(--accent)', true));
   g.append(modTree(`callees (outbound)`, outs, l => l.t, 'var(--warn)', false));
   info.append(g);
@@ -463,8 +485,27 @@ function modTree(title, rows, pick, color, inbound) {
       line.append(toggle);
       const kids = el('div');
       kids.hidden = true;
-      kids.style.paddingLeft = last ? '18px' : '18px';
+      kids.style.paddingLeft = '18px';
       kids.style.borderLeft = last ? 'none' : '1px solid var(--line)';
+      const files = ((D.mod_edge_files || {})[key] || []);
+      if (files.length) {
+        const head = el('div', 'loc', inbound
+          ? `called from these files in ${other}:` : `called from these files in ${self}:`);
+        head.style.marginTop = '2px';
+        kids.append(head);
+        files.forEach(([f, n]) => {
+          const row = el('div');
+          const nm = el('span', null, f.split('/').slice(-2).join('/'));
+          nm.style.color = 'var(--accent)';
+          nm.title = f;
+          row.append(document.createTextNode('   '), nm,
+                     el('span', 'loc', `  ${fmt(n)} call site${n === 1 ? '' : 's'}`));
+          kids.append(row);
+        });
+        const fnHead = el('div', 'loc', 'function pairs:');
+        fnHead.style.marginTop = '4px';
+        kids.append(fnHead);
+      }
       detail.forEach((d, j) => {
         const [caller, callee, file, ln, n] = d;
         const row = el('div');
