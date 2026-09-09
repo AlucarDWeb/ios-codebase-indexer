@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """idxg: query a Swift/clang index-store knowledge graph (codebase-memory shaped)."""
-import argparse, json, os, re, sqlite3, subprocess, sys, textwrap
+import argparse, json, os, re, shutil, sqlite3, subprocess, sys, textwrap
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import project as prj
@@ -1219,15 +1219,25 @@ def cmd_deinit(a):
             removed.append(f"{candidate}  (agent note stripped)")
 
     if a.purge:
-        for key in ("db", "html"):
-            path = entry.get(key)
-            if path and os.path.exists(path):
+        db_file = entry.get("db") or prj.db_for(root)
+        stem = db_file[:-3] if db_file.endswith(".db") else db_file
+        targets = [db_file, entry.get("html") or stem + "-explorer.html", stem + "-history.db",
+                   db_file + ".building", db_file + ".lock"]
+        targets += [t + sfx for t in list(targets) for sfx in ("-wal", "-shm")]
+        if os.path.isdir(os.path.dirname(db_file)):
+            targets += [os.path.join(os.path.dirname(db_file), f) for f in os.listdir(os.path.dirname(db_file))
+                        if f.startswith(os.path.basename(stem) + "-digest-") and f.endswith(".html")]
+        for path in dict.fromkeys(targets):
+            if os.path.isfile(path):
                 os.remove(path)
                 removed.append(path)
-            for suffix in ("-wal", "-shm"):
-                extra = (path or "") + suffix
-                if path and os.path.exists(extra):
-                    os.remove(extra)
+        for d in (db_file + ".building.shards", stem + "-vault"):
+            if os.path.isdir(d):
+                shutil.rmtree(d)
+                removed.append(d + "/")
+        external_vault = prj.effective_config(root).get("history_vault")
+        if external_vault and os.path.isdir(os.path.expanduser(external_vault)):
+            kept.append(f"{external_vault}  (your vault; clippings written there stay)")
 
     if root in reg:
         del reg[root]
@@ -1244,7 +1254,7 @@ def cmd_deinit(a):
         for k in kept:
             print("  " + k)
     if not a.purge and entry.get("db"):
-        print(f"\nkept the graph at {entry['db']} (pass --purge to delete it)")
+        print(f"\nkept the graph, history and explorer beside {entry['db']} (pass --purge to delete them)")
     print("\nre-index any time with: idxg init")
 
 
@@ -1697,7 +1707,8 @@ def build_parser():
 
     p = sub.add_parser("deinit", help="remove what init installed in a project")
     p.add_argument("path", nargs="?")
-    p.add_argument("--purge", action="store_true", help="also delete the graph and explorer")
+    p.add_argument("--purge", action="store_true",
+                   help="also delete the graph, history db, explorer, digests and the default vault export")
     p.add_argument("--force", action="store_true",
                    help="delete the project skill even when it has a Project notes section")
     p.set_defaults(fn=cmd_deinit, no_stale_check=True)

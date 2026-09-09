@@ -138,6 +138,7 @@ idxg coverage Sources/Feature             # what the compiled index actually cov
 idxg sql "SELECT kind, COUNT(*) n FROM symbols WHERE in_repo=1 GROUP BY kind"
 idxg viz --scope MyModule --open          # HTML explorer
 idxg schema                               # tables, edge kinds, role bits
+idxg deinit --purge                       # un-index: skill, CLAUDE.md block, registry, graph, history, explorer
 
 idxg history build                        # git log of main + repo docs -> <project>-history.db
 idxg history log Sources/Feature/ --files # commits touching a path, with changed files
@@ -157,6 +158,18 @@ idxg docs show Documentation/Testing.md   # print one doc
 Every query command takes `--json`, and `--db <path>` to point at another project's
 graph. Symbols resolve by bare name, `Module.Name`, or USR; an ambiguous name lists
 candidates unless you pass `--first`.
+
+## Removing a project
+
+```bash
+idxg deinit            # remove the project skill and the CLAUDE.md block, forget the project
+idxg deinit --purge    # also delete the graph, the history db, the explorer, digests and the
+                       # default vault export under ~/.cache/indexstore-graph
+```
+
+`deinit` keeps a project skill that has a `## Project notes` section unless you pass
+`--force`, and never touches a vault you pointed `history_vault` at. `idxg autoindex
+--uninstall` removes the launchd agent, which is per machine rather than per project.
 
 ## Where the index store comes from
 

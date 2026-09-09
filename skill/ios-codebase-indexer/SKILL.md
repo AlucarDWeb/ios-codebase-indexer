@@ -59,6 +59,7 @@ idxg docs list --module MyModule
 idxg docs show Documentation/Testing.md --max-bytes 8000
 idxg history build                                    # pull new commits, resync docs
 idxg history vault --out <vault dir>                  # clippings for a knowledge vault
+idxg deinit --purge                                   # un-index a project completely
 ```
 
 `--json` on any query command, `--db <path>` to target another project's graph. Symbols
