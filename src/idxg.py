@@ -934,6 +934,25 @@ def cmd_open(a):
     subprocess.run(["open", html])
 
 
+def store_settled(stores, quiet_seconds, max_wait):
+    """True once the index store has stopped changing for quiet_seconds.
+
+    A build writes units continuously, so reindexing on the first write would snapshot a
+    half-compiled state and then be stale again immediately.
+    """
+    import time as _t
+    waited = 0
+    last = prj.store_signature(stores)
+    while waited < max_wait:
+        _t.sleep(quiet_seconds)
+        waited += quiet_seconds
+        now = prj.store_signature(stores)
+        if now == last:
+            return True
+        last = now
+    return False
+
+
 def plist_path():
     return os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCH_LABEL}.plist")
 
@@ -951,14 +970,20 @@ def cmd_autoindex(a):
             stale, reason, _ = prj.staleness(meta(d))
             d.close()
             stamp = __import__("time").strftime("%Y-%m-%d %H:%M:%S")
-            if stale:
-                print(f"{stamp} reindexing {root} ({reason})", flush=True)
-                try:
-                    build_now(root, jobs=a.jobs, quiet=True)
-                except SystemExit as e:
-                    print(f"{stamp} failed: {e}", flush=True)
-            else:
+            if not stale:
                 print(f"{stamp} fresh {root}", flush=True)
+                continue
+            settle = a.settle if a.settle is not None else 45
+            if settle > 0 and not store_settled(reg[root].get("stores") or [], settle, a.settle_max):
+                print(f"{stamp} {root} still being written after {a.settle_max}s, leaving it "
+                      f"for the next trigger", flush=True)
+                continue
+            print(f"{stamp} reindexing {root} ({reason})", flush=True)
+            try:
+                build_now(root, jobs=a.jobs, quiet=True)
+                print(f"{stamp} done {root}", flush=True)
+            except SystemExit as e:
+                print(f"{stamp} failed: {e}", flush=True)
         return
     if a.status:
         p = plist_path()
@@ -986,6 +1011,17 @@ def cmd_autoindex(a):
     p = plist_path()
     os.makedirs(os.path.dirname(p), exist_ok=True)
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "idxg.py")
+    watch_paths = []
+    if a.watch:
+        for entry in prj.load_registry().values():
+            for st in entry.get("stores") or []:
+                units = os.path.join(st, "v5", "units")
+                watch_paths.append(units if os.path.isdir(units) else st)
+    watch_block = ""
+    if watch_paths:
+        joined = "\n".join(f"        <string>{w}</string>" for w in dict.fromkeys(watch_paths))
+        watch_block = (f"    <key>WatchPaths</key>\n    <array>\n{joined}\n    </array>\n"
+                       f"    <key>ThrottleInterval</key><integer>120</integer>\n")
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -998,7 +1034,7 @@ def cmd_autoindex(a):
         <string>autoindex</string>
         <string>--run-once</string>
     </array>
-    <key>StartInterval</key><integer>{int(minutes) * 60}</integer>
+{watch_block}    <key>StartInterval</key><integer>{int(minutes) * 60}</integer>
     <key>RunAtLoad</key><false/>
     <key>LowPriorityIO</key><true/>
     <key>Nice</key><integer>5</integer>
@@ -1012,7 +1048,10 @@ def cmd_autoindex(a):
     subprocess.run(["launchctl", "unload", p], capture_output=True)
     r = subprocess.run(["launchctl", "load", p], capture_output=True, text=True)
     print(f"installed {p}")
-    print(f"  checks every {minutes} min, reindexes any registered project whose store changed")
+    if watch_paths:
+        print(f"  watches {len(set(watch_paths))} index store dir(s); a build that writes records")
+        print(f"  wakes it, it waits for writes to stop, then reindexes")
+    print(f"  also checks every {minutes} min as a fallback")
     print(f"  log: {log}")
     if r.returncode != 0:
         print("  launchctl load said:", (r.stderr or r.stdout).strip())
@@ -1144,6 +1183,12 @@ def build_parser():
     g.add_argument("--run-once", action="store_true", help="what the agent runs on each tick")
     p.add_argument("--every", type=int, metavar="MINUTES")
     p.add_argument("--jobs", type=int)
+    p.add_argument("--watch", action="store_true",
+                   help="also trigger on index-store writes, so a build refreshes the graph")
+    p.add_argument("--settle", type=int, metavar="SECONDS",
+                   help="quiet period the store must hold before reindexing (default 45)")
+    p.add_argument("--settle-max", type=int, default=1800, metavar="SECONDS",
+                   help="give up waiting for quiet after this long (default 1800)")
     p.set_defaults(fn=cmd_autoindex, no_stale_check=True)
     return ap
 
