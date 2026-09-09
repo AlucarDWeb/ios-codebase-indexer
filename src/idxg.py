@@ -686,6 +686,73 @@ https://github.com/AlucarDWeb/ios-codebase-indexer and run `idxg init` here.
     return path, tracked
 
 
+def cmd_deinit(a):
+    """Undo everything init put in a project, optionally the graph itself."""
+    root = os.path.realpath(os.path.expanduser(a.path)) if a.path else prj.find_root()
+    reg = prj.load_registry()
+    entry = reg.get(root, {})
+    removed, kept = [], []
+
+    skill = os.path.join(root, ".claude", "skills", "codebase-index", "SKILL.md")
+    if os.path.exists(skill):
+        with open(skill) as f:
+            had_notes = NOTES_MARKER in f.read()
+        if had_notes and not a.force:
+            kept.append(f"{skill}  (has a Project notes section; pass --force to delete)")
+        else:
+            os.remove(skill)
+            removed.append(skill)
+            d = os.path.dirname(skill)
+            for probe in (d, os.path.dirname(d)):
+                try:
+                    os.rmdir(probe)
+                except OSError:
+                    break
+
+    for candidate in {os.path.join(root, "CLAUDE.md"),
+                      os.path.join(root, prj.effective_config(root).get("claude_md_path") or "CLAUDE.md")}:
+        if not os.path.exists(candidate):
+            continue
+        with open(candidate) as f:
+            text = f.read()
+        if CLAUDE_START in text and CLAUDE_END in text:
+            head = text[:text.index(CLAUDE_START)]
+            tail = text[text.index(CLAUDE_END) + len(CLAUDE_END):]
+            new = (head.rstrip("\n") + "\n") + tail.lstrip("\n")
+            with open(candidate, "w") as f:
+                f.write(new)
+            removed.append(f"{candidate}  (agent note stripped)")
+
+    if a.purge:
+        for key in ("db", "html"):
+            path = entry.get(key)
+            if path and os.path.exists(path):
+                os.remove(path)
+                removed.append(path)
+            for suffix in ("-wal", "-shm"):
+                extra = (path or "") + suffix
+                if path and os.path.exists(extra):
+                    os.remove(extra)
+
+    if root in reg:
+        del reg[root]
+        prj.save_registry(reg)
+        removed.append(f"registry entry for {root}")
+
+    print(f"project: {root}")
+    if removed:
+        print("removed")
+        for r in removed:
+            print("  " + r)
+    if kept:
+        print("kept")
+        for k in kept:
+            print("  " + k)
+    if not a.purge and entry.get("db"):
+        print(f"\nkept the graph at {entry['db']} (pass --purge to delete it)")
+    print("\nre-index any time with: idxg init")
+
+
 def cmd_config(a):
     root = prj.find_root()
     scope_root = None if a.scope == "global" else root
@@ -981,6 +1048,13 @@ def build_parser():
     p.add_argument("--claude-md-path", dest="claude_md_path",
                    help="write the agent note here instead of <project>/CLAUDE.md")
     p.set_defaults(fn=cmd_init, no_stale_check=True)
+
+    p = sub.add_parser("deinit", help="remove what init installed in a project")
+    p.add_argument("path", nargs="?")
+    p.add_argument("--purge", action="store_true", help="also delete the graph and explorer")
+    p.add_argument("--force", action="store_true",
+                   help="delete the project skill even when it has a Project notes section")
+    p.set_defaults(fn=cmd_deinit, no_stale_check=True)
 
     p = sub.add_parser("config", help="show or change settings for this project")
     p.add_argument("assign", nargs="*", metavar="key=value")
