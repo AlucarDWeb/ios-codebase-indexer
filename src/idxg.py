@@ -692,6 +692,24 @@ def cmd_schema(a):
     --   ACCESSOR_OF getter/setter -> property
     -- every edge row carries the source location of the relation (path_hash, line, col)
     """).strip())
+    hist = _history_module()
+    hp = hist.history_db_for(db_path(a.db))
+    if not os.path.exists(hp):
+        print("\n-- history db: not built (idxg history build)")
+        return
+    h = hist.connect(hp)
+    print(f"\n-- history db: {hp}")
+    for r in h.execute("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name"):
+        print(f"-- {r['type']}: {r['name']}\n{r['sql']};\n")
+    print(textwrap.dedent("""
+    -- commits: one row per first-parent commit of the history branch; pr_* columns come from
+    --   GitHub when gh is logged in (pr_body NULL = not fetched, '' = PR not found)
+    -- commit_files.path equals files.rel in the graph db: that is the join between the two
+    -- commit_files.module comes from the graph's module directory prefixes, NULL when uncompiled
+    -- components: module-depth directories; alive=0 means the branch no longer has the directory
+    -- module_rank: cross-module CALLS in/out per module, used to order digest areas
+    """).strip())
+    h.close()
 
 
 
