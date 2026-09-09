@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""MCP stdio server over an index-store graph: codebase-memory tool shapes, sourcekit data."""
+"""codebase-brain MCP stdio server: the code graph, its history and its docs as tools."""
 import argparse, io, json, os, sys, traceback
 from contextlib import redirect_stdout
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import idxg
 
-SERVER = {"name": "indexstore-graph", "version": "1.0.0"}
+SERVER = {"name": "codebase-brain", "version": "0.1.0"}
 
 TOOLS = [
     {"name": "index_status",

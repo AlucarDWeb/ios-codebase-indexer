@@ -1,7 +1,15 @@
-# ios-codebase-indexer
+# codebase-brain
 
-A queryable code graph for Swift and Objective-C projects, built from the index store
-the compiler already writes.
+A queryable brain for a codebase: the code graph the compiler already knows, the commit
+history of the main branch with its pull request descriptions, and the repository's own
+documentation, in one place for people and coding agents. Today it reads Swift, Objective-C,
+C and C++ through the compiler's index store; the history and docs layers are language
+independent, and other languages are a matter of a second extractor writing the same tables.
+
+Formerly `ios-codebase-indexer`. The CLI is still `idxg`; the first run after upgrading moves
+`~/.config/ios-codebase-indexer` and `~/.cache/indexstore-graph` to `~/.config/codebase-brain`
+and `~/.cache/codebase-brain`, and `idxg init` in an already indexed project replaces the old
+CLAUDE.md block and project skill with the new ones.
 
 Editors get "jump to definition" from that index store. This turns the same data into a
 SQLite graph with a CLI, an MCP server for coding agents, and a self-contained HTML
@@ -12,8 +20,8 @@ protocol conformances are the ones that were actually resolved, each with the ex
 ## Install
 
 ```bash
-git clone https://github.com/AlucarDWeb/ios-codebase-indexer.git
-cd ios-codebase-indexer
+git clone https://github.com/AlucarDWeb/codebase-brain.git
+cd codebase-brain
 ./install.sh
 ```
 
@@ -123,7 +131,7 @@ CLAUDE.md note are picked up per project with no restart needed.
 
 ```bash
 cd /path/to/your/project
-idxg-build --jobs 8        # index store -> ~/.cache/indexstore-graph/<project>.db
+idxg-build --jobs 8        # index store -> ~/.cache/codebase-brain/<project>.db
 idxg status                # counts, edge kinds, coverage
 
 idxg search "location chip mapper"        # full text over camel-split names
@@ -164,7 +172,7 @@ candidates unless you pass `--first`.
 ```bash
 idxg deinit            # remove the project skill and the CLAUDE.md block, forget the project
 idxg deinit --purge    # also delete the graph, the history db, the explorer, digests and the
-                       # default vault export under ~/.cache/indexstore-graph
+                       # default vault export under ~/.cache/codebase-brain
 ```
 
 `deinit` keeps a project skill that has a `## Project notes` section unless you pass

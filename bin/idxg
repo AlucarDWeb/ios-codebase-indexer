@@ -1,5 +1,5 @@
 #!/bin/sh
-# ios-codebase-indexer, resolving symlinks so an installed link still finds src/
+# codebase-brain, resolving symlinks so an installed link still finds src/
 SELF=$0
 while [ -L "$SELF" ]; do
     LINK=$(readlink "$SELF")

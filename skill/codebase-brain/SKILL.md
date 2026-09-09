@@ -1,9 +1,9 @@
 ---
-name: ios-codebase-indexer
+name: codebase-brain
 description: Query a Swift/ObjC code graph built from the compiler's own index store, with exact call and reference edges, plus the project's commit history and its own markdown docs. Use for "who calls X", "what does X call", "where is X referenced", callers of a protocol requirement, override chains, cross-module call weights, or any structural question where a tree-sitter graph or grep would guess; and for "who changed X and why", "when did module Y appear", "what changed in Z this quarter", "what does the repo's documentation say about W". Also covers building and refreshing the graph, the history db, the HTML explorer and the knowledge-vault export.
 ---
 
-# ios-codebase-indexer (idxg)
+# codebase-brain (idxg)
 
 A code graph whose edges come from `libIndexStore`, so calls, references, overrides and
 conformances are the ones the compiler resolved, each with the exact `file:line` of the
@@ -81,7 +81,7 @@ the plain bazel build's `_global_index_store` when
 `--features=swift.index_while_building` is on. Xcode indexes Objective-C by default,
 which the Bazel Swift rules do not, so an Xcode build is the cheapest way to get `.m`
 coverage. The database lands at
-`~/.cache/indexstore-graph/<repo-dir-name>.db` and `idxg` resolves it from the current
+`~/.cache/codebase-brain/<project>.db` and `idxg` resolves it from the current
 directory's name.
 
 ## Operational notes and gotchas

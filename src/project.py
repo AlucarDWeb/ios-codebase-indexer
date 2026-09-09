@@ -1,10 +1,34 @@
-"""Project registry, store detection and staleness for ios-codebase-indexer."""
-import hashlib, json, os, plistlib, subprocess, time
+"""Project registry, store detection and staleness for codebase-brain."""
+import hashlib, json, os, plistlib, shutil, subprocess, time
 
-CONFIG_DIR = os.path.expanduser("~/.config/ios-codebase-indexer")
-CACHE_DIR = os.path.expanduser("~/.cache/indexstore-graph")
+CONFIG_DIR = os.path.expanduser("~/.config/codebase-brain")
+CACHE_DIR = os.path.expanduser("~/.cache/codebase-brain")
 REGISTRY = os.path.join(CONFIG_DIR, "projects.json")
 CONFIG = os.path.join(CONFIG_DIR, "config.json")
+# Where the tool kept its state before it was renamed from ios-codebase-indexer.
+LEGACY_CONFIG_DIR = os.path.expanduser("~/.config/ios-codebase-indexer")
+LEGACY_CACHE_DIR = os.path.expanduser("~/.cache/indexstore-graph")
+
+
+def migrate_legacy_dirs():
+    """Move the old config and cache directories to the new names once, rewriting the
+    database paths the registry holds so every indexed project survives the rename."""
+    moved = []
+    if os.path.isdir(LEGACY_CONFIG_DIR) and not os.path.exists(CONFIG_DIR):
+        shutil.move(LEGACY_CONFIG_DIR, CONFIG_DIR)
+        moved.append((LEGACY_CONFIG_DIR, CONFIG_DIR))
+    if os.path.isdir(LEGACY_CACHE_DIR) and not os.path.exists(CACHE_DIR):
+        shutil.move(LEGACY_CACHE_DIR, CACHE_DIR)
+        moved.append((LEGACY_CACHE_DIR, CACHE_DIR))
+        if os.path.exists(REGISTRY):
+            with open(REGISTRY) as f:
+                text = f.read()
+            with open(REGISTRY, "w") as f:
+                f.write(text.replace(LEGACY_CACHE_DIR + "/", CACHE_DIR + "/"))
+    return moved
+
+
+_MIGRATED = migrate_legacy_dirs()
 
 DEFAULT_CONFIG = {
     "auto_refresh_on_query": False,   # rebuild inline when a query hits a stale graph

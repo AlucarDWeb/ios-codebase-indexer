@@ -1,8 +1,10 @@
-# ios-codebase-indexer
+# codebase-brain
 
 A queryable code graph for Swift and Objective-C, built from the index store the
-compiler already writes. Python 3.9+, macOS, standard library only. No third-party
-packages, no build step, no tests directory yet.
+compiler already writes, plus the main branch's commit history (with PR descriptions) and
+the repo's own docs. Python 3.9+, macOS, standard library only. No third-party packages,
+no build step, no tests directory yet. Renamed from `ios-codebase-indexer` on 2026-09-09;
+the CLI stayed `idxg`.
 
 ## Layout
 
@@ -98,6 +100,12 @@ roles: `CALLS` (calledBy), `REFERENCES` (containedBy), `CONTAINS` (childOf), `IN
   and state why they truncated. Summary calls cache their expensive counts in `meta` at
   build time. Keep new tools in that shape, and re-run `bench/bench_mcp.py` if you touch
   an output path.
+- **The old name must keep working for anyone who installed it.** `project.py` moves the
+  legacy config and cache directories on import and rewrites registry paths; `idxg init`
+  and `deinit` recognise the `ios-codebase-indexer` CLAUDE.md markers and the
+  `codebase-index` project skill (carrying its Project notes over); `autoindex` unloads the
+  old launchd label; `install.sh` removes the old skill link and MCP registration. Remove
+  these paths only with a release note that says which version dropped them.
 - **Nothing may assume one repository's layout.** Layers are derived from path segments,
   not hardcoded module names. This ships to other projects. The same holds for history:
   the branch is resolved (`main`, `master`, origin's HEAD), component depth is the median
@@ -151,7 +159,7 @@ found.
   that looks wrong but is intentional. No narration of what the code says.
 - Documentation states limits plainly. Coverage caveats and false-positive classes belong
   in the output and the docs, not only in a commit message.
-- `README.md` is the user-facing surface, `skill/ios-codebase-indexer/SKILL.md` is what
+- `README.md` is the user-facing surface, `skill/codebase-brain/SKILL.md` is what
   an agent reads. Both need updating when a command or a default changes, and so do the
   MCP tool descriptions in `mcp_server.py` and the project skill text in `idxg.py`.
 - `idxg init` writes a project skill and a CLAUDE.md block into the target repo.

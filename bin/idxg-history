@@ -1,5 +1,5 @@
 #!/bin/sh
-# idxg history <subcommand>, resolving symlinks so an installed link still finds src/
+# codebase-brain, idxg history <subcommand>, resolving symlinks so an installed link still finds src/
 SELF=$0
 while [ -L "$SELF" ]; do
     LINK=$(readlink "$SELF")

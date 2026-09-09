@@ -1018,10 +1018,41 @@ def cmd_docs(a):
     a.hfn(a)
 
 
-CLAUDE_START = "<!-- ios-codebase-indexer:start -->"
-CLAUDE_END = "<!-- ios-codebase-indexer:end -->"
-LAUNCH_LABEL = "com.ios-codebase-indexer.autoindex"
+CLAUDE_START = "<!-- codebase-brain:start -->"
+CLAUDE_END = "<!-- codebase-brain:end -->"
+# Markers and label the tool wrote before it was renamed; init and deinit still recognise them.
+LEGACY_CLAUDE_START = "<!-- ios-codebase-indexer:start -->"
+LEGACY_CLAUDE_END = "<!-- ios-codebase-indexer:end -->"
+LAUNCH_LABEL = "com.codebase-brain.autoindex"
+LEGACY_LAUNCH_LABEL = "com.ios-codebase-indexer.autoindex"
+PROJECT_SKILL = "codebase-brain"
+LEGACY_PROJECT_SKILL = "codebase-index"
 NOTES_MARKER = "## Project notes"
+
+
+def _markers_in(text):
+    for start, end in ((CLAUDE_START, CLAUDE_END), (LEGACY_CLAUDE_START, LEGACY_CLAUDE_END)):
+        if start in text and end in text:
+            return start, end
+    return None, None
+
+
+def _remove_skill_dir(path, keep_notes_into=None):
+    """Delete a project skill directory the tool wrote under an older name, carrying its
+    Project notes section over to the new skill file so nothing the user wrote is lost."""
+    skill = os.path.join(path, "SKILL.md")
+    if not os.path.exists(skill):
+        return
+    if keep_notes_into:
+        with open(skill) as f:
+            old = f.read()
+        if NOTES_MARKER in old:
+            notes = old[old.index(NOTES_MARKER) + len(NOTES_MARKER):].lstrip("\n")
+            target = os.path.join(keep_notes_into, "SKILL.md")
+            if notes.strip() and not os.path.exists(target):
+                with open(target, "w") as f:
+                    f.write(NOTES_MARKER + "\n\n" + notes)
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def project_stats(db_file):
@@ -1042,11 +1073,12 @@ def project_stats(db_file):
 def install_project_skill(root, db_file):
     m, n, mods, langs = project_stats(db_file)
     name = m.get("project") or os.path.basename(root)
-    d = os.path.join(root, ".claude", "skills", "codebase-index")
+    d = os.path.join(root, ".claude", "skills", PROJECT_SKILL)
     os.makedirs(d, exist_ok=True)
+    _remove_skill_dir(os.path.join(root, ".claude", "skills", LEGACY_PROJECT_SKILL), keep_notes_into=d)
     body = f"""---
-name: codebase-index
-description: Query {name}'s compiler-accurate code graph (index-store backed) instead of grepping. Use for who calls X, what X calls, where X is referenced, override and conformance chains, module coupling, dead-code candidates, or any structural question about this codebase. Also covers refreshing the index after a build.
+name: codebase-brain
+description: Query {name}'s compiler-accurate code graph, its commit history and its own docs instead of grepping. Use for who calls X, what X calls, where X is referenced, override and conformance chains, module coupling, dead-code candidates, or any structural question about this codebase. Also covers refreshing the index after a build.
 ---
 
 # {name} code index
@@ -1059,7 +1091,7 @@ across {n['files']:,} files; run `idxg status` for the current numbers, the data
 and how much of the repo the last build actually covered.
 
 If `idxg` is missing, install it from
-https://github.com/AlucarDWeb/ios-codebase-indexer and run `idxg init` here.
+https://github.com/AlucarDWeb/codebase-brain and run `idxg init` here.
 
 ## Use it before grepping
 
@@ -1132,7 +1164,7 @@ def install_claude_md(root, db_file, target=None):
     m, n, _, _ = project_stats(db_file)
     name = m.get("project") or os.path.basename(root)
     note = f"""{CLAUDE_START}
-## Code index (ios-codebase-indexer)
+## Code index and history (codebase-brain)
 
 This repo can be queried as a compiler-accurate code graph, built from the index store
 the compiler already writes. `idxg status` prints the database path and coverage.
@@ -1157,17 +1189,18 @@ idxg docs search "<words>"                    # the repo's own docs, full text
 
 The graph reflects the last compile, so refresh after building, and treat a file with no
 index records as unproven rather than unused. Details and caveats live in
-`.claude/skills/codebase-index/SKILL.md`. Missing `idxg`? Install it from
-https://github.com/AlucarDWeb/ios-codebase-indexer and run `idxg init` here.
+`.claude/skills/codebase-brain/SKILL.md`. Missing `idxg`? Install it from
+https://github.com/AlucarDWeb/codebase-brain and run `idxg init` here.
 {CLAUDE_END}"""
     path = target or os.path.join(root, "CLAUDE.md")
     existing = ""
     if os.path.exists(path):
         with open(path) as f:
             existing = f.read()
-    if CLAUDE_START in existing and CLAUDE_END in existing:
-        head = existing[:existing.index(CLAUDE_START)]
-        tail = existing[existing.index(CLAUDE_END) + len(CLAUDE_END):]
+    start, end = _markers_in(existing)
+    if start:
+        head = existing[:existing.index(start)]
+        tail = existing[existing.index(end) + len(end):]
         new = head + note + tail
     else:
         sep = "" if not existing else ("" if existing.endswith("\n\n") else
@@ -1188,8 +1221,10 @@ def cmd_deinit(a):
     entry = reg.get(root, {})
     removed, kept = [], []
 
-    skill = os.path.join(root, ".claude", "skills", "codebase-index", "SKILL.md")
-    if os.path.exists(skill):
+    for skill_dir in (PROJECT_SKILL, LEGACY_PROJECT_SKILL):
+        skill = os.path.join(root, ".claude", "skills", skill_dir, "SKILL.md")
+        if not os.path.exists(skill):
+            continue
         with open(skill) as f:
             had_notes = NOTES_MARKER in f.read()
         if had_notes and not a.force:
@@ -1210,9 +1245,10 @@ def cmd_deinit(a):
             continue
         with open(candidate) as f:
             text = f.read()
-        if CLAUDE_START in text and CLAUDE_END in text:
-            head = text[:text.index(CLAUDE_START)]
-            tail = text[text.index(CLAUDE_END) + len(CLAUDE_END):]
+        start, end = _markers_in(text)
+        if start:
+            head = text[:text.index(start)]
+            tail = text[text.index(end) + len(end):]
             new = (head.rstrip("\n") + "\n") + tail.lstrip("\n")
             with open(candidate, "w") as f:
                 f.write(new)
@@ -1425,6 +1461,16 @@ def plist_path():
     return os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCH_LABEL}.plist")
 
 
+def _remove_legacy_agent():
+    """Unload the agent installed under the tool's previous name, so two agents never
+    reindex the same projects."""
+    old = os.path.expanduser(f"~/Library/LaunchAgents/{LEGACY_LAUNCH_LABEL}.plist")
+    if os.path.exists(old):
+        subprocess.run(["launchctl", "unload", old], capture_output=True)
+        os.remove(old)
+        print(f"removed the agent installed under the old name: {old}")
+
+
 def cmd_autoindex(a):
     log = os.path.join(prj.CACHE_DIR, "autoindex.log")
     if a.run_once:
@@ -1465,6 +1511,7 @@ def cmd_autoindex(a):
                     print("  " + line.rstrip())
         return
     if a.uninstall:
+        _remove_legacy_agent()
         p = plist_path()
         subprocess.run(["launchctl", "unload", p], capture_output=True)
         if os.path.exists(p):
@@ -1472,6 +1519,7 @@ def cmd_autoindex(a):
         print(f"removed {p}")
         return
     # install
+    _remove_legacy_agent()
     minutes = a.every or prj.effective_config().get("poll_minutes", 15)
     if a.every:
         prj.set_config("poll_minutes", a.every, None)
@@ -1526,8 +1574,8 @@ def cmd_autoindex(a):
 
 
 def build_parser():
-    ap = argparse.ArgumentParser(prog="idxg", description="query a Swift index-store graph")
-    ap.add_argument("--db", help="graph db path (default ~/.cache/indexstore-graph/<cwd>.db)")
+    ap = argparse.ArgumentParser(prog="idxg", description="codebase-brain: a code graph, its history and its docs")
+    ap.add_argument("--db", help="graph db path (default ~/.cache/codebase-brain/<project>.db)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("status", help="index status + coverage summary")
