@@ -103,6 +103,89 @@ TOOLS = [
     {"name": "get_schema",
      "description": "Full db schema plus the edge-kind and occurrence-role vocabulary.",
      "inputSchema": {"type": "object", "properties": {"db": {"type": "string"}}}},
+    {"name": "get_history",
+     "description": "Commits on the project's main branch that touched a path, a symbol's file, a "
+                    "module, or matched an author or subject text. Each row: date, short sha, author, "
+                    "subject, PR number, tickets, files and line counts. Attribution to modules follows "
+                    "the compiled index, so uncompiled files have none. Pass with_files to list the "
+                    "paths each commit changed.",
+     "inputSchema": {"type": "object", "properties": {
+         "paths": {"type": "array", "items": {"type": "string"},
+                   "description": "repo-relative files, directories (trailing /) or globs"},
+         "symbol": {"type": "string", "description": "history of the file defining this symbol"},
+         "module": {"type": "string"}, "component": {"type": "string", "description": "module-depth directory"},
+         "author": {"type": "string"}, "since": {"type": "string", "description": "YYYY-MM-DD"},
+         "until": {"type": "string"}, "query": {"type": "string", "description": "substring of subject, body or ticket"},
+         "with_files": {"type": "boolean"},
+         "narrate": {"type": "boolean", "description": "one plain paragraph per commit: who, what, why "
+                                                        "(from the PR description), which files and modules"},
+         "limit": {"type": "integer", "default": 30},
+         "max_bytes": {"type": "integer", "default": 12000, "description": "cap the payload of one call"},
+         "db": {"type": "string"}}}},
+    {"name": "get_commit",
+     "description": "One commit in full: message body, PR, tickets, and every file it changed with "
+                    "line counts and module attribution.",
+     "inputSchema": {"type": "object", "properties": {
+         "sha": {"type": "string", "description": "full or short sha, or a PR number as #123"},
+         "max_files": {"type": "integer", "default": 80},
+         "max_body": {"type": "integer", "default": 4000, "description": "cap the PR description"},
+         "db": {"type": "string"}},
+         "required": ["sha"]}},
+    {"name": "get_digest",
+     "description": "Weekly digest of the main branch: headline and stats for the window, the changes "
+                    "that stood out, then every change narrated in plain language and grouped by area "
+                    "(tooling first, then modules ordered by how much the rest of the code depends on "
+                    "them, features, tests last). Defaults to the week of the last commit. Pass a "
+                    "since/until pair for any window.",
+     "inputSchema": {"type": "object", "properties": {
+         "week": {"type": "string", "description": "ISO week, e.g. 2026-W36"},
+         "since": {"type": "string"}, "until": {"type": "string"},
+         "max_bytes": {"type": "integer", "default": 16000}, "db": {"type": "string"}}}},
+    {"name": "get_churn",
+     "description": "Where change concentrates: commits, lines and authors per module, component "
+                    "directory, file or author over a window (default the last 365 days).",
+     "inputSchema": {"type": "object", "properties": {
+         "since": {"type": "string", "description": "YYYY-MM-DD"},
+         "by": {"type": "string", "enum": ["module", "component", "file", "author"], "default": "module"},
+         "ext": {"type": "string", "description": "restrict to one extension, e.g. swift"},
+         "limit": {"type": "integer", "default": 25}, "db": {"type": "string"}}}},
+    {"name": "get_timeline",
+     "description": "Narrative history of the project: an overview paragraph, then one paragraph per "
+                    "period (year, quarter or month by span) with commit and author counts, most "
+                    "touched modules, distinctive subject words, directories that appeared or "
+                    "disappeared, and the largest change. Every sentence is computed from git log.",
+     "inputSchema": {"type": "object", "properties": {
+         "periods": {"type": "integer", "default": 6, "description": "most recent periods to narrate; 0 = all"},
+         "granularity": {"type": "string", "enum": ["year", "quarter", "month"]},
+         "db": {"type": "string"}}}},
+    {"name": "list_docs",
+     "description": "Markdown documentation tracked in the repository (READMEs, CLAUDE.md notes, "
+                    "skills, design docs), each with kind, module attribution and last-commit date. "
+                    "Filter by module to find a module's own docs without knowing their paths.",
+     "inputSchema": {"type": "object", "properties": {
+         "module": {"type": "string"}, "kind": {"type": "string",
+                    "description": "readme, agent-note, skill, guide or doc"},
+         "path_glob": {"type": "string"}, "limit": {"type": "integer", "default": 60},
+         "db": {"type": "string"}}}},
+    {"name": "search_docs",
+     "description": "Full-text search (BM25) over the repository's markdown docs, with a snippet "
+                    "per hit. Use it before reading a doc file, and for 'how does this project do X' "
+                    "questions the code graph cannot answer.",
+     "inputSchema": {"type": "object", "properties": {
+         "query": {"type": "string"}, "limit": {"type": "integer", "default": 10},
+         "db": {"type": "string"}}, "required": ["query"]}},
+    {"name": "get_doc",
+     "description": "The content of one repository doc by path (or a unique path suffix), with its "
+                    "last-commit date. Truncated at max_bytes with a note.",
+     "inputSchema": {"type": "object", "properties": {
+         "path": {"type": "string"}, "max_bytes": {"type": "integer", "default": 12000},
+         "db": {"type": "string"}}, "required": ["path"]}},
+    {"name": "refresh_history",
+     "description": "Pull new commits from the history branch and re-sync repo docs. Incremental and "
+                    "cheap after the first run; index_status shows when it last ran.",
+     "inputSchema": {"type": "object", "properties": {
+         "full": {"type": "boolean", "description": "rebuild from the first commit"},
+         "db": {"type": "string"}}}},
     {"name": "build_visualizer",
      "description": "Generate the self-contained HTML graph explorer and return its path.",
      "inputSchema": {"type": "object", "properties": {
@@ -169,6 +252,36 @@ def call(name, a):
         return run(idxg.cmd_projects, ns(db=None))
     if name == "get_schema":
         return run(idxg.cmd_schema, ns(db=db))
+    if name == "get_history":
+        return run(idxg.cmd_history_log, ns(db=db, paths=a.get("paths") or [], symbol=a.get("symbol"),
+                                            module=a.get("module"), component=a.get("component"),
+                                            author=a.get("author"), since=a.get("since"),
+                                            until=a.get("until"), grep=a.get("query"),
+                                            files=bool(a.get("with_files")), narrate=bool(a.get("narrate")),
+                                            limit=a.get("limit", 30), max_bytes=a.get("max_bytes", 12000)))
+    if name == "get_digest":
+        return run(idxg.cmd_history_digest, ns(db=db, week=a.get("week"), since=a.get("since"),
+                                               until=a.get("until"), list=False, limit=30, html=None,
+                                               open=False, max_bytes=a.get("max_bytes", 16000)))
+    if name == "get_commit":
+        return run(idxg.cmd_history_show, ns(db=db, sha=a["sha"], max_files=a.get("max_files", 80),
+                                             max_body=a.get("max_body", 4000)))
+    if name == "get_churn":
+        return run(idxg.cmd_history_churn, ns(db=db, since=a.get("since"), by=a.get("by", "module"),
+                                              ext=a.get("ext"), limit=a.get("limit", 25)))
+    if name == "get_timeline":
+        return run(idxg.cmd_history_timeline, ns(db=db, periods=a.get("periods", 6),
+                                                 granularity=a.get("granularity")))
+    if name == "list_docs":
+        return run(idxg.cmd_docs_list, ns(db=db, module=a.get("module"), kind=a.get("kind"),
+                                          path=a.get("path_glob"), limit=a.get("limit", 60)))
+    if name == "search_docs":
+        return run(idxg.cmd_docs_search, ns(db=db, query=a["query"], limit=a.get("limit", 10)))
+    if name == "get_doc":
+        return run(idxg.cmd_docs_show, ns(db=db, path=a["path"], max_bytes=a.get("max_bytes", 12000)))
+    if name == "refresh_history":
+        return run(idxg.cmd_history_build, ns(db=db, full=bool(a.get("full")), branch=None, since=None,
+                                              docs=True, prs=True, all_commits=False))
     if name == "build_visualizer":
         return run(idxg.cmd_viz, ns(db=db, scope=a.get("scope"), out=a.get("out"), limit=a.get("limit"),
                                     edge_cap=120000, per_node_cap=14, title=None, open=False))

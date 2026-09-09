@@ -211,7 +211,7 @@ def cmd_status(a):
     if recounted:
         cache_summary(a.db, counts, per_kind, tracked, covered)
     if a.json:
-        print(json.dumps({"meta": m, "counts": counts,
+        print(json.dumps({"meta": m, "counts": counts, "history": _history_status(a.db),
                           "edges_by_kind": {r["kind"]: r["c"] for r in per_kind},
                           "files_in_repo": in_repo, "swift_symbols": swift,
                           "coverage": {"tracked_sources": tracked, "covered": covered,
@@ -234,6 +234,22 @@ def cmd_status(a):
         print(f"\ncoverage: {covered:,}/{tracked:,} tracked sources have index records "
               f"({100*covered/tracked:.1f}%)")
         print("  a file with no records was never compiled in the indexed build; grep it instead.")
+    hist_line = _history_status(a.db)
+    if hist_line:
+        print(f"\nhistory: {hist_line}")
+
+
+def _history_status(db_arg):
+    hist = _history_module()
+    hp = hist.history_db_for(db_path(db_arg))
+    if not os.path.exists(hp):
+        return "not built (idxg history build adds commit history and repo docs)"
+    h = hist.connect(hp)
+    m = hist.meta(h)
+    h.close()
+    return (f"{int(m.get('count_commits') or 0):,} commits on {m.get('branch')} "
+            f"({m.get('first_day')} to {m.get('last_day')}), {int(m.get('count_docs') or 0)} docs, "
+            f"built {m.get('built_at')} at {m.get('head_sha', '')[:11]}")
 
 
 def cache_summary(db_arg, counts, per_kind, tracked, covered):
@@ -600,9 +616,10 @@ def cmd_viz(a):
         cov = sum(1 for f in tracked if f in have)
         data["meta"]["coverage_pct"] = round(100 * cov / len(tracked), 1) if tracked else None
         data["meta"]["coverage"] = f"{cov}/{len(tracked)}"
+    db_file = db_path(a.db)
+    viz.attach_history(data, db_file, weeks=cfgv.get("viz_history_weeks", 26))
     # Derive the default from the database path, the same way build.py does, so viz and a
     # build cannot write two different explorer files for one project.
-    db_file = db_path(a.db)
     default_out = os.path.join(os.path.dirname(db_file),
                                os.path.basename(db_file).replace(".db", "-explorer.html"))
     out = os.path.expanduser(a.out) if a.out else default_out
@@ -679,6 +696,328 @@ def cmd_schema(a):
 
 
 # ---------------------------------------------------------------- project setup
+# ---------------------------------------------------------------- history and docs
+def _history_module():
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import history
+    return history
+
+
+def history_db(a):
+    """Read-only connection to the history db that belongs to the graph in scope."""
+    hist = _history_module()
+    return hist, hist.connect(hist.history_db_for(db_path(getattr(a, "db", None))))
+
+
+def _history_config(a):
+    root = meta(connect(a.db)).get("repo_root") or prj.find_root()
+    return root, prj.effective_config(root)
+
+
+def cmd_history_build(a):
+    hist = _history_module()
+    graph = db_path(a.db)
+    root, cfg = _history_config(a)
+    manifest = cfg.get("docs_manifest") or None
+    if manifest and not os.path.isabs(os.path.expanduser(manifest)):
+        manifest = os.path.join(root, manifest)
+    first_parent = cfg.get("history_first_parent", True) and not getattr(a, "all_commits", False)
+    path, counts = hist.build(root, graph, branch=a.branch or (cfg.get("history_branch") or None),
+                              first_parent=first_parent, full=a.full, since=a.since,
+                              docs=a.docs, prs=a.prs and cfg.get("history_prs", True), manifest_path=manifest)
+    if getattr(a, "json", False):
+        print(json.dumps({"db": path, **counts}))
+
+
+def _fmt_commit(r, web=""):
+    pr = f"  #{r['pr']}" if r["pr"] else ""
+    tickets = f"  [{r['tickets']}]" if r["tickets"] else ""
+    return (f"{r['day']}  {r['short']}  {r['subject'][:100]}{pr}{tickets}\n"
+            f"            {r['author']}  {r['files']} files  +{r['ins']:,} -{r['del']:,}")
+
+
+def _symbol_paths(a):
+    """The definition file of a symbol, so its history is the history of that file."""
+    db = connect(a.db)
+    cands = resolve(db, a.symbol)
+    if not cands:
+        raise SystemExit(f"no symbol matched {a.symbol!r}")
+    r = cands[0]
+    if not r["def_path_hash"]:
+        raise SystemExit(f"{a.symbol} has no definition site in the index, so no file to follow")
+    path = rel(db, r["def_path_hash"])
+    db.close()
+    return path, r
+
+
+def cmd_history_log(a):
+    hist, hdb = history_db(a)
+    paths = list(getattr(a, "paths", None) or [])
+    note = ""
+    if getattr(a, "symbol", None):
+        path, sym = _symbol_paths(a)
+        paths.append(path)
+        note = (f"following {sym['name']} through its definition file {path}; line-level history "
+                f"is not tracked, so unrelated edits to the file appear too\n")
+    rows = hist.commits_for(hdb, paths=paths or None, module=a.module, component=a.component,
+                            author=a.author, since=a.since, until=a.until, query=a.grep, limit=a.limit)
+    m = hist.meta(hdb)
+    if getattr(a, "json", False):
+        out = [dict(r) for r in rows]
+        if a.files:
+            for o in out:
+                o["changed"] = [dict(f) for f in hist.files_of(hdb, o["sha"], 60)]
+        if getattr(a, "narrate", False):
+            for o in out:
+                full = hdb.execute("SELECT * FROM commits WHERE sha = ?", (o["sha"],)).fetchone()
+                o["narrative"] = hist.narrate_commit(full, hist.files_of(hdb, o["sha"]), m.get("remote_web", ""))
+        print(json.dumps({"branch": m.get("branch"), "head": m.get("head_sha"), "commits": out}, indent=1))
+        return
+    print(f"{m.get('branch')} @ {m.get('head_sha', '')[:11]}, built {m.get('built_at')}"
+          + (f"  (scope: {', '.join(filter(None, paths + [a.module, a.component]))})" if paths or a.module or a.component else ""))
+    if note:
+        print(note.rstrip())
+    if not rows:
+        print("no commits matched. Module filters only see files the compiled index attributes; "
+              "try a path or directory instead.")
+        return
+    spent, shown = 0, 0
+    budget = getattr(a, "max_bytes", 12000)
+    web = m.get("remote_web", "")
+    for r in rows:
+        if getattr(a, "narrate", False):
+            full = hdb.execute("SELECT * FROM commits WHERE sha = ?", (r["sha"],)).fetchone()
+            block = [textwrap.fill(hist.narrate_commit(full, hist.files_of(hdb, r["sha"]), web), 100)
+                     + (f"\n  {web}/pull/{r['pr']}" if web and r["pr"] else "")]
+        else:
+            block = [_fmt_commit(r)]
+        if a.files:
+            for f in hist.files_of(hdb, r["sha"], 8):
+                mod = f"  [{f['module']}]" if f["module"] else ""
+                block.append(f"              +{f['ins']:<5} -{f['del']:<5} {f['path']}{mod}")
+            if r["files"] > 8:
+                block.append(f"              ... {r['files'] - 8} more files (idxg history show {r['short']})")
+        text = "\n".join(block)
+        if spent + len(text) > budget and shown:
+            print(f"... {len(rows) - shown} more commits not printed: {budget:,} byte budget reached "
+                  f"(raise --max-bytes, or narrow with --since, --module or a path)")
+            break
+        print(text)
+        spent += len(text) + 1
+        shown += 1
+    if shown == len(rows) == a.limit:
+        print(f"(showing {a.limit}; raise --limit or narrow with --since, --module or a path)")
+
+
+def cmd_history_show(a):
+    hist, hdb = history_db(a)
+    ident = a.sha.strip()
+    if ident.startswith("#") and ident[1:].isdigit():
+        r = hdb.execute("SELECT * FROM commits WHERE pr = ? ORDER BY committed DESC", (int(ident[1:]),)).fetchone()
+    else:
+        r = hdb.execute("SELECT * FROM commits WHERE sha = ? OR sha GLOB ? ORDER BY committed DESC",
+                        (ident, ident + "*")).fetchone()
+    if not r:
+        raise SystemExit(f"no commit {ident} in the history of {hist.meta(hdb).get('branch')}")
+    files = hist.files_of(hdb, r["sha"], a.max_files)
+    web = hist.meta(hdb).get("remote_web", "")
+    if getattr(a, "json", False):
+        d = dict(r)
+        d["changed"] = [dict(f) for f in files]
+        print(json.dumps(d, indent=1))
+        return
+    print(f"{r['sha']}  {r['day']}  {r['author']} <{r['email']}>")
+    print(f"{r['subject']}")
+    if r["pr"]:
+        print(f"pr: #{r['pr']}" + (f"  {web}/pull/{r['pr']}" if web else ""))
+    if r["tickets"]:
+        print(f"tickets: {r['tickets']}")
+    print(f"{r['files']} files, +{r['ins']:,} -{r['del']:,}, {r['parents']} parent(s)")
+    print("\n" + textwrap.fill(hist.narrate_commit(r, hist.files_of(hdb, r["sha"], 2000), web), 100))
+    if r["pr_body"]:
+        print(f"\npull request description" + (f" ({r['pr_labels']})" if r["pr_labels"] else ""))
+        print(textwrap.indent(r["pr_body"][:a.max_body], "  "))
+        if len(r["pr_body"]) > a.max_body:
+            print(f"  ... truncated at {a.max_body:,} bytes (raise --max-body)")
+    if r["body"]:
+        print("\ncommit body")
+        print(textwrap.indent(r["body"], "  "))
+    print("\nfiles")
+    for f in files:
+        mod = f"  [{f['module']}]" if f["module"] else ""
+        old = f"  (was {f['old_path']})" if f["old_path"] else ""
+        print(f"  +{f['ins']:<5} -{f['del']:<5} {f['path']}{mod}{old}")
+    if r["files"] > len(files):
+        print(f"  ... {r['files'] - len(files)} more (raise --max-files)")
+
+
+def cmd_history_churn(a):
+    hist, hdb = history_db(a)
+    import datetime as _dt
+    since = a.since or (_dt.date.today() - _dt.timedelta(days=365)).isoformat()
+    rows = hist.churn(hdb, since=since, by=a.by, limit=a.limit, ext=a.ext)
+    if getattr(a, "json", False):
+        print(json.dumps({"since": since, "by": a.by, "rows": [dict(r) for r in rows]}, indent=1))
+        return
+    print(f"change since {since}, by {a.by}" + (f", {a.ext} files only" if a.ext else ""))
+    if a.by == "module":
+        print("modules come from the compiled index; a file the build never compiled is counted nowhere here")
+    w = max([len(str(r["key"])) for r in rows] + [10])
+    w = min(w, 60)
+    print(f"  {'':<{w}} {'commits':>8} {'+lines':>9} {'-lines':>9} {'authors':>8}  last")
+    for r in rows:
+        key = str(r["key"])
+        key = key if len(key) <= w else "..." + key[-(w - 3):]
+        print(f"  {key:<{w}} {r['commits']:>8,} {r['ins'] or 0:>9,} {r['del'] or 0:>9,} {r['authors']:>8}  {r['last']}")
+
+
+def cmd_history_timeline(a):
+    hist, hdb = history_db(a)
+    m = hist.meta(hdb)
+    granularity, all_eras = hist.eras(hdb, granularity=a.granularity)
+    shown = all_eras[-a.periods:] if a.periods else all_eras
+    paras = hist.narrate(m, granularity, shown, all_eras)
+    overview = hist.overview_text(hdb)
+    if getattr(a, "json", False):
+        print(json.dumps({"overview": overview, "granularity": granularity,
+                          "periods": [{**e, "text": p["text"]} for e, p in zip(shown, paras)]}, indent=1))
+        return
+    print(textwrap.fill(overview, 100))
+    print(f"\none paragraph per {granularity}, {len(shown)} of {len(all_eras)} shown"
+          + ("" if len(shown) == len(all_eras) else " (--periods 0 for all)"))
+    for p in paras:
+        print()
+        print(textwrap.fill(p["text"], 100))
+
+
+def _resolve_window(a, hist, hdb):
+    m = hist.meta(hdb)
+    if getattr(a, "week", None):
+        return hist.week_bounds(a.week)
+    if getattr(a, "since", None) or getattr(a, "until", None):
+        return a.since or m.get("first_day"), a.until or m.get("last_day")
+    return hist.week_bounds(hist.iso_week(m.get("last_day")))
+
+
+def cmd_history_digest(a):
+    hist, hdb = history_db(a)
+    m = hist.meta(hdb)
+    if getattr(a, "list", False):
+        for w, n in hist.weeks(hdb, limit=a.limit):
+            s, e = hist.week_bounds(w)
+            print(f"  {w}  {s} to {e}  {n:>4} commits")
+        return
+    start, end = _resolve_window(a, hist, hdb)
+    data = hist.week_digest(hdb, start, end, m.get("remote_web", ""))
+    if getattr(a, "json", False):
+        print(json.dumps(data, indent=1, ensure_ascii=False))
+        return
+    html_arg = getattr(a, "html", None)
+    if html_arg:
+        graph = db_path(a.db)
+        out = (os.path.expanduser(html_arg) if html_arg != "auto" else
+               os.path.join(os.path.dirname(graph), os.path.basename(graph).replace(".db", f"-digest-{start}.html")))
+        with open(out, "w") as f:
+            f.write(hist.render_digest(data))
+        print(f"wrote {out}  ({os.path.getsize(out) / 1024:.0f} KB, {data['window']['commits']} changes)")
+        if getattr(a, "open", False):
+            subprocess.run(["open", out])
+        return
+    text = hist.digest_text(data)
+    budget = getattr(a, "max_bytes", 0)
+    if budget and len(text) > budget:
+        print(text[:budget])
+        print(f"\n... truncated at {budget:,} of {len(text):,} bytes (raise --max-bytes, or --json for the data)")
+    else:
+        print(text)
+
+
+def cmd_history_vault(a):
+    hist = _history_module()
+    graph = db_path(a.db)
+    hdb_path = hist.history_db_for(graph)
+    root, cfg = _history_config(a)
+    out = a.out or cfg.get("history_vault") or os.path.join(
+        os.path.dirname(graph), os.path.basename(graph).replace(".db", "-vault"))
+    written, superseded = hist.export_vault(hdb_path, out, docs=a.docs, history=a.history,
+                                            modules_min_commits=a.min_commits, dry=a.dry_run)
+    for w in written[:40]:
+        print(f"  {w}")
+    if len(written) > 40:
+        print(f"  ... {len(written) - 40} more")
+    for new, old in superseded[:20]:
+        print(f"  {new} supersedes {old}")
+    print(f"\nClippings/ follows the knowledge-vault contract: files are never rewritten, a changed source "
+          f"becomes a date-suffixed clipping. Point a vault's compile step at {out}/Clippings, or pass "
+          f"--out <vault> to write into the vault directly.")
+
+
+def cmd_docs_list(a):
+    hist, hdb = history_db(a)
+    rows = hist.docs_list(hdb, module=a.module, kind=a.kind, path_glob=a.path, limit=a.limit)
+    m = hist.meta(hdb)
+    if getattr(a, "json", False):
+        print(json.dumps([dict(r) for r in rows], indent=1))
+        return
+    total = int(m.get("count_docs") or 0)
+    print(f"{len(rows)} of {total} repo docs (branch {m.get('branch')}, synced {m.get('built_at')})")
+    kind = None
+    for r in rows:
+        if r["kind"] != kind:
+            kind = r["kind"]
+            print(f"\n{kind}")
+        mod = f"  [{r['module']}]" if r["module"] else ""
+        refreshed = f"  generated sections as of {r['mechanical_refreshed']}" if r["mechanical_refreshed"] else ""
+        print(f"  {r['published'] or '----------'}  {r['path']}{mod}  {r['bytes'] // 1024}k{refreshed}")
+    if len(rows) == a.limit:
+        print(f"\n(showing {a.limit}; raise --limit or filter with --module, --kind, --path)")
+    print("\n`published` is the file's last commit date on the history branch, not the date its content is true.")
+
+
+def cmd_docs_search(a):
+    hist, hdb = history_db(a)
+    rows = hist.docs_search(hdb, a.query, limit=a.limit)
+    if getattr(a, "json", False):
+        print(json.dumps([dict(r) for r in rows], indent=1))
+        return
+    if not rows:
+        print(f"no doc matched {a.query!r}. Docs are the repo's tracked markdown; try idxg docs list.")
+        return
+    for r in rows:
+        mod = f"  [{r['module']}]" if r["module"] else ""
+        print(f"{r['path']}{mod}  ({r['kind']}, {r['published'] or 'undated'})")
+        print("    " + " ".join(r["snip"].split())[:220])
+
+
+def cmd_docs_show(a):
+    hist, hdb = history_db(a)
+    r = hist.doc_get(hdb, a.path)
+    if isinstance(r, list):
+        if not r:
+            raise SystemExit(f"no doc at {a.path!r}; idxg docs search finds one by content")
+        print(f"{a.path!r} matches several docs:")
+        for c in r:
+            print(f"  {c['path']}")
+        return
+    body = r["content"]
+    print(f"{r['path']}  ({r['kind']}, last commit {r['published'] or 'unknown'}"
+          + (f", generated sections as of {r['mechanical_refreshed']}" if r["mechanical_refreshed"] else "")
+          + (f", module {r['module']}" if r["module"] else "") + f", {r['bytes']:,} bytes)\n")
+    if len(body) > a.max_bytes:
+        print(body[:a.max_bytes])
+        print(f"\n... truncated at {a.max_bytes:,} of {len(body):,} bytes (raise --max-bytes)")
+    else:
+        print(body)
+
+
+def cmd_history(a):
+    a.hfn(a)
+
+
+def cmd_docs(a):
+    a.hfn(a)
+
+
 CLAUDE_START = "<!-- ios-codebase-indexer:start -->"
 CLAUDE_END = "<!-- ios-codebase-indexer:end -->"
 LAUNCH_LABEL = "com.ios-codebase-indexer.autoindex"
@@ -733,6 +1072,15 @@ idxg search --name '<regex>' --kind Struct,Class
 idxg snippet <Symbol>                          # definition from disk
 idxg arch                                      # layers, modules, hotspots
 idxg sql "SELECT ..."                          # raw SQL, see idxg schema
+idxg history log --symbol <Symbol>             # commits that touched its file, with PRs
+idxg history log --module <Module> --since 2026-01-01
+idxg history log --narrate --since <date>      # one paragraph per commit: who, what, why
+idxg history show #<PR>                        # one change in full: PR description, files, modules
+idxg history digest [--week 2026-W36]          # the week, every change narrated, by area
+idxg history churn --by module                 # where change concentrated this year
+idxg history timeline                          # the project's history in prose
+idxg docs search "<words>"                     # the repo's own markdown docs, full text
+idxg docs list --module <Module>               # a module's README, CLAUDE.md, design docs
 ```
 
 Add `--json` for machine-readable output. Symbols resolve by bare name, `Module.Name`, or
@@ -750,6 +1098,11 @@ USR; ambiguous names list candidates unless you pass `--first`.
   annotations included). Default to `--kind CALLS` and add `REFERENCES` deliberately.
 - Swift properties also exist as `getter:`/`setter:` methods; call edges land on the
   accessor. Use `--kind CALLS,ACCESSOR_OF` when a property looks unused.
+- History is the main branch's `git log`, one row per merge. Module attribution follows
+  the compiled index, so a commit to a file the build never compiled has no module. For
+  "why was this done", read the commit body with `idxg history show`.
+- Repo docs are the tracked markdown files; `published` is a file's last commit date,
+  not the date its content is true. Prefer the code graph when the two disagree.
 
 Largest modules: {', '.join(mods[:12])}.
 
@@ -797,6 +1150,9 @@ idxg search "<words>" | idxg search --name '<regex>' --kind Struct,Class
 idxg arch                                     # module coupling and hotspots
 idxg coverage <path>                          # what the index actually covers
 idxg refresh                                  # reindex after a build or edits
+idxg history log --symbol <Symbol>            # who changed it, when, in which PR
+idxg history timeline                         # the project's history in prose
+idxg docs search "<words>"                    # the repo's own docs, full text
 ```
 
 The graph reflects the last compile, so refresh after building, and treat a file with no
@@ -952,6 +1308,9 @@ def cmd_init(a):
     done = [f"database: {db}"]
     if entry.get("html"):
         done.append(f"explorer: {entry['html']}")
+    hist = _history_module()
+    if os.path.exists(hist.history_db_for(db)):
+        done.append(f"history:  {hist.history_db_for(db)}")
     if a.skill:
         done.append(f"skill:    {install_project_skill(root, db)}")
     if a.claude_md:
@@ -965,7 +1324,9 @@ def cmd_init(a):
         print("  " + line)
     print("\nnext")
     print("  idxg status            what the index covers")
-    print("  idxg open             the visual explorer")
+    print("  idxg history timeline  the project's history in prose")
+    print("  idxg docs search <q>   the repo's own docs")
+    print("  idxg open              the visual explorer")
     print("  idxg autoindex --install   keep it fresh in the background")
 
 
@@ -1240,6 +1601,88 @@ def build_parser():
 
     p = sub.add_parser("schema", help="print the db schema and edge/role vocabulary")
     p.set_defaults(fn=cmd_schema)
+
+    p = sub.add_parser("history", help="commit history of the main branch, joined to the graph")
+    hs = p.add_subparsers(dest="hcmd", required=True)
+    h = hs.add_parser("build", help="extract git log (incremental) and sync repo docs")
+    h.add_argument("--full", action="store_true", help="start over instead of continuing from the last head")
+    h.add_argument("--branch", help="history branch (default: config history_branch, then main, master)")
+    h.add_argument("--since", help="only commits after YYYY-MM-DD (cheaper first build)")
+    h.add_argument("--all-commits", action="store_true",
+                   help="every commit reachable from the branch, not one per merge")
+    h.add_argument("--no-docs", dest="docs", action="store_false", default=True)
+    h.add_argument("--no-prs", dest="prs", action="store_false", default=True,
+                   help="skip fetching pull request descriptions through gh")
+    h.add_argument("--json", action="store_true")
+    h.set_defaults(hfn=cmd_history_build)
+    h = hs.add_parser("log", help="commits touching paths, a symbol's file, a module, an author")
+    h.add_argument("paths", nargs="*", help="repo-relative files, directories (trailing /) or globs")
+    h.add_argument("--symbol", help="follow the file that defines this symbol")
+    h.add_argument("--module"); h.add_argument("--component", help="module-depth directory")
+    h.add_argument("--author"); h.add_argument("--since"); h.add_argument("--until")
+    h.add_argument("--grep", help="substring of subject, body or ticket")
+    h.add_argument("--files", action="store_true", help="list changed files per commit")
+    h.add_argument("--narrate", action="store_true",
+                   help="one plain paragraph per commit: who, what, why (from the PR), which files")
+    h.add_argument("--limit", type=int, default=30)
+    h.add_argument("--max-bytes", type=int, default=12000,
+                   help="cap printed bytes, keeping one call affordable for an agent")
+    h.add_argument("--json", action="store_true")
+    h.set_defaults(hfn=cmd_history_log)
+    h = hs.add_parser("show", help="one commit in full, by sha or #PR")
+    h.add_argument("sha"); h.add_argument("--max-files", type=int, default=80)
+    h.add_argument("--max-body", type=int, default=4000, help="cap the printed PR description")
+    h.add_argument("--json", action="store_true")
+    h.set_defaults(hfn=cmd_history_show)
+    h = hs.add_parser("digest", help="weekly digest: every change narrated, grouped by area")
+    h.add_argument("--week", help="ISO week, e.g. 2026-W36 (default: the week of the last commit)")
+    h.add_argument("--since"); h.add_argument("--until")
+    h.add_argument("--list", action="store_true", help="list weeks with commit counts")
+    h.add_argument("--limit", type=int, default=30, help="weeks shown by --list")
+    h.add_argument("--html", nargs="?", const="auto", metavar="PATH",
+                   help="write the digest page (the vault's weekly-digest layout); default path beside the db")
+    h.add_argument("--open", action="store_true")
+    h.add_argument("--max-bytes", type=int, default=0, help="cap the text output (0 = no cap)")
+    h.add_argument("--json", action="store_true")
+    h.set_defaults(hfn=cmd_history_digest)
+    h = hs.add_parser("churn", help="where change concentrates over a window")
+    h.add_argument("--since", help="YYYY-MM-DD (default: 365 days ago)")
+    h.add_argument("--by", choices=["module", "component", "file", "author"], default="module")
+    h.add_argument("--ext", help="one extension, e.g. swift")
+    h.add_argument("--limit", type=int, default=30)
+    h.add_argument("--json", action="store_true")
+    h.set_defaults(hfn=cmd_history_churn)
+    h = hs.add_parser("timeline", help="narrative history, one paragraph per period")
+    h.add_argument("--periods", type=int, default=6, help="most recent periods (0 = all)")
+    h.add_argument("--granularity", choices=["year", "quarter", "month"])
+    h.add_argument("--json", action="store_true")
+    h.set_defaults(hfn=cmd_history_timeline)
+    h = hs.add_parser("vault", help="write history and docs as knowledge-vault clippings")
+    h.add_argument("--out", help="vault directory (default: config history_vault, else beside the db)")
+    h.add_argument("--no-docs", dest="docs", action="store_false", default=True)
+    h.add_argument("--no-history", dest="history", action="store_false", default=True)
+    h.add_argument("--min-commits", type=int, default=3, help="modules with fewer commits get no note")
+    h.add_argument("--dry-run", action="store_true")
+    h.set_defaults(hfn=cmd_history_vault)
+    p.set_defaults(fn=cmd_history, no_stale_check=True)
+
+    p = sub.add_parser("docs", help="the repository's own markdown docs, searchable")
+    ds = p.add_subparsers(dest="dcmd", required=True)
+    d = ds.add_parser("list", help="docs by kind, module or path")
+    d.add_argument("--module"); d.add_argument("--kind", help="readme, agent-note, skill, guide, doc")
+    d.add_argument("--path", help="glob on the repo path")
+    d.add_argument("--limit", type=int, default=100)
+    d.add_argument("--json", action="store_true")
+    d.set_defaults(hfn=cmd_docs_list)
+    d = ds.add_parser("search", help="full-text search over doc content")
+    d.add_argument("query"); d.add_argument("--limit", type=int, default=10)
+    d.add_argument("--json", action="store_true")
+    d.set_defaults(hfn=cmd_docs_search)
+    d = ds.add_parser("show", help="print one doc")
+    d.add_argument("path", help="repo path or a unique suffix of it")
+    d.add_argument("--max-bytes", type=int, default=12000)
+    d.set_defaults(hfn=cmd_docs_show)
+    p.set_defaults(fn=cmd_docs, no_stale_check=True)
 
     p = sub.add_parser("init", help="index a project and install its skill + CLAUDE.md note")
     p.add_argument("path", nargs="?", help="project root (default: detected from the cwd)")

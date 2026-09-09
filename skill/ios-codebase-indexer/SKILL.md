@@ -1,6 +1,6 @@
 ---
 name: ios-codebase-indexer
-description: Query a Swift/ObjC code graph built from the compiler's own index store, with exact call and reference edges. Use for "who calls X", "what does X call", "where is X referenced", callers of a protocol requirement, override chains, cross-module call weights, or any structural question where a tree-sitter graph or grep would guess. Also covers building and refreshing that graph and generating its HTML explorer.
+description: Query a Swift/ObjC code graph built from the compiler's own index store, with exact call and reference edges, plus the project's commit history and its own markdown docs. Use for "who calls X", "what does X call", "where is X referenced", callers of a protocol requirement, override chains, cross-module call weights, or any structural question where a tree-sitter graph or grep would guess; and for "who changed X and why", "when did module Y appear", "what changed in Z this quarter", "what does the repo's documentation say about W". Also covers building and refreshing the graph, the history db, the HTML explorer and the knowledge-vault export.
 ---
 
 # ios-codebase-indexer (idxg)
@@ -21,6 +21,12 @@ relation. Prefer it over grep for structure, and over a parser-derived graph alw
 | unused code, dead-code candidates | `idxg dead --verify` |
 | literal text, comments, strings, uncompiled files | ripgrep |
 | files the compiled build never touched | `idxg coverage` first, then ripgrep |
+| who changed this, when, in which PR, and why | `idxg history log --symbol X --narrate`, then `idxg history show` |
+| what happened this week, in plain language, by area | `idxg history digest [--week 2026-W36]` |
+| what changed in a module or path since a date | `idxg history log --module M --since` |
+| where change concentrates, hotspots by churn | `idxg history churn` |
+| how the project evolved, when something appeared or went away | `idxg history timeline` |
+| what the repo's own docs say (README, CLAUDE.md, design docs) | `idxg docs search`, `idxg docs list --module M` |
 
 ## Commands
 
@@ -39,6 +45,20 @@ idxg dead --verify --module MyModule
 idxg coverage Sources/Feature SomeFile.swift
 idxg viz --scope MyModule --open
 idxg schema
+
+idxg history log --symbol MyReducer --limit 10        # commits touching its file
+idxg history log Modules/Feature/X/ --since 2026-01-01 --files
+idxg history log --narrate --module MyModule --limit 10   # one paragraph per commit
+idxg history show '#21447'                            # PR description, files, module attribution
+idxg history digest --week 2026-W36                   # the week narrated, grouped by area
+idxg history digest --html --open                     # same, as the vault's digest page
+idxg history churn --by module --since 2026-01-01
+idxg history timeline --periods 4                     # prose, newest periods
+idxg docs search "dependency injection"
+idxg docs list --module MyModule
+idxg docs show Documentation/Testing.md --max-bytes 8000
+idxg history build                                    # pull new commits, resync docs
+idxg history vault --out <vault dir>                  # clippings for a knowledge vault
 ```
 
 `--json` on any query command, `--db <path>` to target another project's graph. Symbols
@@ -111,9 +131,44 @@ directory's name.
 - `usr_hash` is a 64-bit blake2 of the USR and is the primary key everywhere. Join on it,
   and use `usr` when you need the stable compiler identity.
 
+## History and docs
+
+- **History is `git log --first-parent` of the history branch** (`main`, then `master`,
+  or `idxg config history_branch`). One row per merge, with body, PR number and ticket
+  keys. It lives in `<project>-history.db` beside the graph and refreshes after every
+  `idxg-build`; `idxg history build` refreshes it alone, incrementally.
+- **Module attribution follows the compiled index.** A changed file maps to a module by
+  the directory prefix the graph knows for it, so files the build never compiled belong
+  to no module: `--module` filters miss them and per-module churn is a lower bound. Filter
+  by path when completeness matters.
+- **`--symbol` follows the definition file, not the symbol.** Unrelated edits to the same
+  file appear. For "why", read the PR description with `idxg history show <sha|#PR>`.
+- **"Why" comes from pull request descriptions fetched through `gh`.** Squash commits carry
+  no body here, so without `gh auth login` the narration says only what files moved, and
+  `idxg history digest` lists that as a gap. `--narrate` and the digest prefer the PR
+  template section whose heading mentions what, why or context.
+- **Digest areas are ordered by the code graph, tags by subject and labels.** A module the
+  rest of the code calls a lot sorts early, a leaf feature late; `prod` means the word
+  hotfix appeared, `build` means only tooling files changed. Neither is a judgement of
+  importance, and a fix whose title lacks the word is untagged.
+- **The timeline is a factual digest.** Every sentence is a count from the log: commits,
+  authors, most touched modules, distinctive subject words, directories first or last
+  seen, largest change. Quote it as data, not as a judgement of what mattered.
+- **Docs are the tracked markdown files.** `published` is a file's last commit date, not
+  the date its content is true; `mechanical_refreshed` (from a `Last refreshed:` footer)
+  dates generated sections. When a doc and the graph disagree, the graph is the compiled
+  code. `idxg docs search` is BM25 over content; `idxg docs show` truncates at
+  `--max-bytes` and says so.
+- **Vault export is append-only.** `idxg history vault` writes clippings with
+  `source: repo-doc` or `source: git-history` frontmatter and never rewrites a file; a
+  changed source becomes a date-suffixed clipping. Closed periods are stable, so only the
+  current period and changed docs produce new files on re-run.
+
 ## MCP
 
 Tools: `index_status`, `search_graph`, `trace_path`, `find_references`,
 `get_code_snippet`, `query_graph`, `check_index_coverage`, `get_architecture`,
-`get_schema`, `build_visualizer`. The server resolves the database from the session's
+`get_schema`, `build_visualizer`; history and docs: `get_history`, `get_commit`,
+`get_churn`, `get_timeline`, `get_digest`, `list_docs`, `search_docs`, `get_doc`,
+`refresh_history`. `get_history` with `narrate: true` gives one paragraph per commit. The server resolves the database from the session's
 working directory; pass `db` to override.

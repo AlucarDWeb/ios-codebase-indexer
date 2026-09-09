@@ -44,6 +44,14 @@ CALLS = [
     ("check_index_coverage", {"paths": ["."]}),
     ("query_graph", {"query": "SELECT kind, COUNT(*) n FROM symbols WHERE in_repo=1 "
                               "GROUP BY kind ORDER BY n DESC LIMIT 5"}),
+    ("get_history", {"symbol": SYM}),
+    ("get_history", {"limit": 30, "with_files": True}),
+    ("get_history", {"limit": 10, "narrate": True}),
+    ("get_digest", {}),
+    ("get_churn", {}),
+    ("get_timeline", {"periods": 3}),
+    ("list_docs", {"kind": "readme"}),
+    ("search_docs", {"query": "architecture"}),
 ]
 
 print(f"{'tool':<22}{'ms':>7}{'bytes':>9}{'~tokens':>9}")

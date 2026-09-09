@@ -5,3 +5,4 @@ __pycache__/
 *.db-shm
 *.html
 .DS_Store
+!src/templates/*.html

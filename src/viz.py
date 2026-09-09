@@ -67,6 +67,21 @@ svg line{stroke:var(--line)}
 footer{color:var(--dim);font-size:11px;padding:14px 18px;border-top:1px solid var(--line)}
 .pill{display:inline-block;font-size:10px;color:var(--dim);border:1px solid var(--line);border-radius:10px;
   padding:0 7px;margin-right:5px}
+.prose{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:14px;
+  line-height:1.6;max-width:78ch;color:var(--fg)}
+.prose p{margin:0 0 12px}
+.era{border-left:2px solid var(--line);padding:2px 0 2px 14px;margin:0 0 16px}
+.era.on{border-left-color:var(--accent)}
+.era h3{font-size:13px;margin:0 0 6px;font-family:var(--mono);color:var(--accent);cursor:pointer}
+.era .facts{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--dim);margin-bottom:6px}
+.chart{width:100%;height:160px;background:var(--panel);border:1px solid var(--line);border-radius:6px}
+.chart rect{fill:var(--accent2);fill-opacity:.7}
+.chart rect.hi{fill:var(--accent);fill-opacity:1}
+.chart text{font-size:9px;fill:var(--dim)}
+.subj{color:var(--fg)}
+.sha{color:var(--dim);font-size:11px}
+a.ext{color:var(--accent2);text-decoration:none}
+a.ext:hover{text-decoration:underline}
 </style>
 """
 
@@ -249,16 +264,20 @@ BODY = """
   <button data-tab="modules">modules</button>
   <button data-tab="symbols">symbols</button>
   <button data-tab="dead">dead code</button>
+  <button data-tab="history">history</button>
+  <button data-tab="docs">docs</button>
 </nav>
 <main>
   <section id="overview"></section>
   <section id="modules" hidden></section>
   <section id="symbols" hidden></section>
   <section id="dead" hidden></section>
+  <section id="history" hidden></section>
+  <section id="docs" hidden></section>
 </main>
 <footer>
   built __BUILT__ from index-store format v__FMT__ &middot; slice: __SLICE__ symbols, __EDGECOUNT__ edges
-  &middot; regenerate with <code>idxg viz</code>
+  &middot; history __HISTORY__ &middot; regenerate with <code>idxg viz</code>
 </footer>
 <script>
 const D = __DATA__;
@@ -827,14 +846,272 @@ function renderDead() {
   if (!n) box.append(el('div', 'empty', 'nothing matches'));
 }
 
+/* ---------- history ---------- */
+const H = D.history;
+function historyTab() {
+  const s = document.getElementById('history');
+  if (s.dataset.init) return;
+  s.dataset.init = '1';
+  if (!H) {
+    const c = el('div', 'card');
+    c.append(el('h2', null, 'no history yet'));
+    const p = el('div', 'prose');
+    p.textContent = 'Run idxg history build to extract the main branch’s git log and the repository’s markdown docs, then idxg viz to include them here.';
+    c.append(p); s.append(c); return;
+  }
+  const m = H.meta;
+  const web = m.remote_web || '';
+  const tiles = el('div', 'tiles');
+  for (const [k, v] of [['commits on ' + (m.branch || 'main'), +m.count_commits],
+                        ['authors', +m.authors], ['first commit', m.first_day], ['last commit', m.last_day],
+                        ['repo docs', +m.count_docs]]) {
+    const d = el('div', 'tile');
+    d.append(el('div', 'n', typeof v === 'number' ? fmt(v) : v), el('div', 'k', k)); tiles.append(d);
+  }
+  s.append(tiles);
+  s.append(weeklyCard());
+  s.append(narratedCard());
+
+  const story = el('div', 'card');
+  story.append(el('h2', null, 'the story so far'));
+  const intro = el('div', 'prose');
+  const ip = el('p'); ip.textContent = H.overview.replace(/`/g, ''); intro.append(ip);
+  story.append(intro);
+  story.append(activityChart());
+  const hint = el('div', 'loc', `one paragraph per ${H.granularity}, newest first; click a heading to see that period's largest changes`);
+  hint.style.margin = '10px 0';
+  story.append(hint);
+  const eras = el('div');
+  const byPeriod = new Map(H.eras.map(e => [e.period, e]));
+  for (const p of [...H.narrative].reverse()) {
+    const e = byPeriod.get(p.period);
+    const box = el('div', 'era');
+    const h = el('h3', null, p.label);
+    const facts = el('div', 'facts');
+    for (const f of [`${fmt(e.commits)} commits`, `${fmt(e.authors)} authors`, `+${fmt(e.ins)} / -${fmt(e.del)} lines`,
+                     e.modules.length ? `top module ${e.modules[0][0]}` : null]) if (f) facts.append(el('span', null, f));
+    const txt = el('div', 'prose'); const tp = el('p'); tp.textContent = p.text; txt.append(tp);
+    const more = el('div'); more.hidden = true;
+    if (e.biggest.length) {
+      const t = el('table'); const tb = el('tbody');
+      for (const b of e.biggest) {
+        const tr = el('tr');
+        tr.append(el('td', 'sha', b.sha), el('td', 'subj', b.subject), numTd(b.files), numTd(b.lines));
+        tb.append(tr);
+      }
+      t.innerHTML = '<thead><tr><th>largest changes</th><th></th><th class="num">files</th><th class="num">lines</th></tr></thead>';
+      t.append(tb); more.append(t);
+    }
+    if (e.modules.length) more.append(el('div', 'loc', 'modules by commits: ' + e.modules.map(([n, c]) => `${n} (${c})`).join(', ')));
+    if (e.born.length) more.append(el('div', 'loc', 'first seen: ' + e.born.map(b => b[1]).join(', ')));
+    if (e.died.length) more.append(el('div', 'loc', 'gone since: ' + e.died.map(b => b[1]).join(', ')));
+    h.onclick = () => { more.hidden = !more.hidden; box.classList.toggle('on', !more.hidden); };
+    box.append(h, facts, txt, more);
+    eras.append(box);
+  }
+  story.append(eras);
+  s.append(story);
+
+
+  const g = el('div', 'grid2');
+  const ch = el('div', 'card');
+  ch.append(el('h2', null, `change by module since ${H.churn_since}`));
+  ch.append(el('div', 'loc', 'modules come from the compiled index; uncompiled files are counted nowhere here'));
+  const t = el('table');
+  t.innerHTML = '<thead><tr><th>module</th><th class="num">commits</th><th class="num">+lines</th><th class="num">-lines</th><th class="num">authors</th><th>last</th></tr></thead>';
+  const tb = el('tbody');
+  for (const [key, commits, ins, del_, authors, last] of H.churn) {
+    const tr = el('tr'); const td = el('td');
+    const a = el('a', null, key); a.style.cursor = 'pointer'; a.style.color = 'var(--accent2)';
+    a.onclick = () => { showTab('symbols'); setModule(key); };
+    td.append(a); tr.append(td, numTd(commits), numTd(ins), numTd(del_), numTd(authors), el('td', 'loc', last));
+    tb.append(tr);
+  }
+  t.append(tb); ch.append(t); g.append(ch);
+
+  const rc = el('div', 'card');
+  rc.append(el('h2', null, `recent changes on ${m.branch || 'main'}`));
+  const rows = el('div', 'rows');
+  for (const [sha, short, author, day, subject, pr, tickets, files, ins, del_] of H.recent) {
+    const r = el('div', 'row'); r.style.cursor = 'default'; r.style.flexWrap = 'wrap';
+    r.append(el('span', 'sha', day), el('span', 'subj', subject));
+    const meta = el('span', 'meta');
+    meta.append(document.createTextNode(`${author}  ${files} files +${fmt(ins)} -${fmt(del_)} `));
+    if (pr) {
+      if (web) { const a = el('a', 'ext', `#${pr}`); a.href = `${web}/pull/${pr}`; a.target = '_blank'; meta.append(a); }
+      else meta.append(document.createTextNode(`#${pr}`));
+    }
+    r.append(meta); rows.append(r);
+  }
+  rc.append(rows); g.append(rc);
+  s.append(g);
+
+  const comps = el('div', 'card');
+  const alive = H.components.filter(c => c[4]), gone = H.components.filter(c => !c[4]);
+  comps.append(el('h2', null, `directories at module depth: ${alive.length} present, ${gone.length} gone (3+ commits each)`));
+  const ct = el('table');
+  ct.innerHTML = '<thead><tr><th>directory</th><th>first</th><th>last</th><th class="num">commits</th><th>state</th><th>module</th></tr></thead>';
+  const cb = el('tbody');
+  for (const [comp, first, last, commits, isAlive, mod] of H.components.slice(0, 120)) {
+    const tr = el('tr');
+    tr.append(el('td', null, comp), el('td', 'loc', first), el('td', 'loc', last), numTd(commits),
+              el('td', isAlive ? 'loc' : 'subj', isAlive ? 'present' : 'gone'), el('td', 'loc', mod || ''));
+    if (!isAlive) tr.style.color = 'var(--warn)';
+    cb.append(tr);
+  }
+  ct.append(cb); comps.append(ct);
+  if (H.components.length > 120) comps.append(el('div', 'loc', `... ${H.components.length - 120} more; idxg sql against the history db lists them all`));
+  s.append(comps);
+}
+
+function weeklyCard() {
+  const card = el('div', 'card');
+  const head = el('div');
+  head.style.display = 'flex'; head.style.alignItems = 'baseline'; head.style.gap = '12px'; head.style.flexWrap = 'wrap';
+  head.append(el('h2', null, 'week by week'));
+  const wk = (H.weeks || []);
+  if (!wk.length) { card.append(head, el('div', 'empty', 'no weeks to show')); return card; }
+  const sel = el('select'); sel.style.width = 'auto';
+  for (const w of [...wk].reverse()) {
+    const o = el('option', null, `${w.week}  ${w.digest.window.start} to ${w.digest.window.end}  (${w.commits} changes)`);
+    o.value = w.week; sel.append(o);
+  }
+  const hint = el('span', 'loc', `${wk.length} most recent weeks, every change narrated; the same layout idxg history digest --html writes`);
+  head.append(sel, hint);
+  card.append(head);
+  const frame = document.createElement('iframe');
+  frame.style.width = '100%'; frame.style.border = '1px solid var(--line)'; frame.style.borderRadius = '6px';
+  frame.style.height = '900px'; frame.style.background = 'transparent';
+  card.append(frame);
+  const byWeek = new Map(wk.map(w => [w.week, w]));
+  const show = () => {
+    const w = byWeek.get(sel.value);
+    const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+    const view = Object.assign({}, w.digest); delete view.window;
+    const page = H.template.replace('{{TITLE}}', `${w.digest.eyebrow[0]} digest, ${w.digest.window.label}`)
+      .replace('{{DIGEST_JSON}}', JSON.stringify(view).replace(/<\\//g, '<\\\\/'));
+    frame.srcdoc = `<!doctype html><html data-theme="${theme}"><head><meta charset="utf-8"></head><body>${page}</body></html>`;
+  };
+  frame.onload = () => {
+    try {
+      const doc = frame.contentDocument;
+      frame.style.height = Math.min(6000, doc.documentElement.scrollHeight + 20) + 'px';
+      doc.body.addEventListener('click', () => setTimeout(() => {
+        frame.style.height = Math.min(6000, doc.documentElement.scrollHeight + 20) + 'px'; }, 30));
+    } catch (e) {}
+  };
+  sel.addEventListener('input', show);
+  document.getElementById('themeToggle').addEventListener('click', () => setTimeout(show, 0));
+  show();
+  return card;
+}
+
+function narratedCard() {
+  const card = el('div', 'card');
+  card.append(el('h2', null, `commit by commit, most recent ${(H.recent_narrated || []).length}`));
+  card.append(el('div', 'loc', 'each paragraph is computed from the commit, its pull request description and its files; older commits: idxg history log --narrate'));
+  const box = el('div', 'rows'); box.style.maxHeight = '60vh';
+  for (const c of (H.recent_narrated || [])) {
+    const row = el('div', 'row'); row.style.cursor = 'default'; row.style.display = 'block';
+    const top = el('div');
+    top.append(el('span', 'sha', `${c.day}  ${c.short}  `));
+    if (c.url) { const a = el('a', 'ext', `#${c.pr}`); a.href = c.url; a.target = '_blank'; top.append(a); }
+    const p = el('div', 'prose'); p.style.fontSize = '13px'; p.style.maxWidth = 'none';
+    p.textContent = c.text;
+    row.append(top, p); box.append(row);
+  }
+  card.append(box);
+  return card;
+}
+
+function activityChart() {
+  const months = H.monthly;
+  const W = 1200, Hh = 160, pad = 28;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'chart'); svg.setAttribute('viewBox', `0 0 ${W} ${Hh}`);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  if (!months.length) return svg;
+  const max = Math.max(...months.map(m => m[1]));
+  const bw = (W - 2 * pad) / months.length;
+  const lastYear = months[months.length - 1][0].slice(0, 4);
+  months.forEach(([month, n, authors], i) => {
+    const h = Math.max(1, (Hh - 30) * n / max);
+    const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    r.setAttribute('x', pad + i * bw); r.setAttribute('y', Hh - 18 - h);
+    r.setAttribute('width', Math.max(1, bw - 1)); r.setAttribute('height', h);
+    if (month.slice(0, 4) === lastYear) r.setAttribute('class', 'hi');
+    const tt = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+    tt.textContent = `${month}: ${fmt(n)} commits, ${authors} authors`;
+    r.append(tt); svg.append(r);
+    if (month.endsWith('-01')) {
+      const tx = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      tx.setAttribute('x', pad + i * bw); tx.setAttribute('y', Hh - 5); tx.textContent = month.slice(0, 4);
+      svg.append(tx);
+    }
+  });
+  const lab = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  lab.setAttribute('x', pad); lab.setAttribute('y', 12); lab.textContent = `commits per month, peak ${fmt(max)}`;
+  svg.append(lab);
+  return svg;
+}
+
+/* ---------- docs ---------- */
+function docsTab() {
+  const s = document.getElementById('docs');
+  if (s.dataset.init) return;
+  s.dataset.init = '1';
+  if (!H || !H.docs.length) {
+    const c = el('div', 'card');
+    c.append(el('h2', null, 'no docs indexed'));
+    const p = el('div', 'prose');
+    p.textContent = 'idxg history build collects the repository’s tracked markdown files; none are recorded yet.';
+    c.append(p); s.append(c); return;
+  }
+  const web = H.meta.remote_web || '', branch = H.meta.branch || 'main';
+  const card = el('div', 'card');
+  card.append(el('h2', null, `${fmt(H.docs.length)} markdown docs tracked in the repository`));
+  card.append(el('div', 'loc', 'date is the file’s last commit on the history branch, not the date its content is true; search their full text with idxg docs search'));
+  const filters = el('div', 'filters');
+  filters.innerHTML = `<input type="text" id="docq" placeholder="filter by path, title or module"><select id="dockind"></select>`;
+  card.append(filters);
+  const rows = el('div', 'rows'); rows.id = 'docrows'; card.append(rows);
+  s.append(card);
+  const kinds = [...new Set(H.docs.map(d => d[2]))].sort();
+  document.getElementById('dockind').innerHTML = '<option value="">all kinds</option>' + kinds.map(k => `<option>${k}</option>`).join('');
+  const render = () => {
+    const q = document.getElementById('docq').value.toLowerCase();
+    const kind = document.getElementById('dockind').value;
+    rows.innerHTML = ''; let group = null, n = 0;
+    for (const [path, title, k, mod, published, bytes] of H.docs) {
+      if (kind && k !== kind) continue;
+      if (q && !(path.toLowerCase().includes(q) || (title || '').toLowerCase().includes(q) || (mod || '').toLowerCase().includes(q))) continue;
+      n++;
+      const g = mod || k;
+      if (g !== group) { group = g; rows.append(el('div', 'group', g)); }
+      const r = el('div', 'row'); r.style.cursor = 'default';
+      const nm = web ? el('a', 'ext', title || path) : el('span', 'nm', title || path);
+      if (web) { nm.href = `${web}/blob/${branch}/${path}`; nm.target = '_blank'; }
+      nm.title = path;
+      r.append(nm, el('span', 'badge', k), el('span', 'meta', `${published || 'undated'}  ${Math.max(1, Math.round(bytes / 1024))}k  ${path}`));
+      rows.append(r);
+    }
+    if (!n) rows.append(el('div', 'empty', 'nothing matches'));
+  };
+  document.getElementById('docq').addEventListener('input', render);
+  document.getElementById('dockind').addEventListener('input', render);
+  render();
+}
+
 /* ---------- tabs ---------- */
 function showTab(name) {
   for (const b of document.querySelectorAll('nav button')) b.classList.toggle('on', b.dataset.tab === name);
-  for (const id of ['overview', 'modules', 'symbols', 'dead'])
+  for (const id of ['overview', 'modules', 'symbols', 'dead', 'history', 'docs'])
     document.getElementById(id).hidden = id !== name;
   if (name === 'modules' && !modState) modulesTab();
   if (name === 'symbols') symbolsTab();
   if (name === 'dead') deadTab();
+  if (name === 'history') historyTab();
+  if (name === 'docs') docsTab();
 }
 for (const b of document.querySelectorAll('nav button')) b.onclick = () => showTab(b.dataset.tab);
 document.getElementById('themeToggle').onclick = () => {
@@ -851,17 +1128,34 @@ overview();
 """
 
 
+def attach_history(data, graph_db_path, weeks=26):
+    """Add the history slice when the project has one; the tab explains itself otherwise."""
+    import history
+    try:
+        data["history"] = history.slice_for_viz(history.history_db_for(graph_db_path), weeks_limit=weeks)
+    except Exception:
+        data["history"] = None
+    return data
+
+
 def render(data, out_path, title=None):
     project = data["meta"].get("project", "index-store graph")
     head = TEMPLATE_HEAD.replace("__TITLE__", title or f"{project} graph")
+    data.setdefault("history", None)
+    h = data["history"]
+    hist_note = (f"{int(h['meta'].get('count_commits') or 0):,} commits to {h['meta'].get('last_day', '')}"
+                 if h else "not built")
     body = (BODY
+            .replace("__HISTORY__", hist_note)
             .replace("__PROJECT__", project)
             .replace("__STORE__", data["meta"].get("store_path", ""))
             .replace("__BUILT__", data["meta"].get("built_at", ""))
             .replace("__FMT__", data["meta"].get("format_version", "?"))
             .replace("__SLICE__", f"{data['slice_size']:,}")
             .replace("__EDGECOUNT__", f"{len(data['edges']):,}")
-            .replace("__DATA__", json.dumps(data, separators=(",", ":"))))
+            # The history slice carries the digest template, which ends in "</script>"; left
+            # unescaped inside the JSON it would close the page's own script element early.
+            .replace("__DATA__", json.dumps(data, separators=(",", ":")).replace("</", "<\\/")))
     with open(out_path, "w") as f:
         f.write(head + body)
     return out_path

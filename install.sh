@@ -8,8 +8,9 @@ SKILLS=${SKILLS_DIR:-$HOME/.claude/skills}
 mkdir -p "$BIN" "$SKILLS"
 ln -sfn "$REPO/bin/idxg" "$BIN/idxg"
 ln -sfn "$REPO/bin/idxg-build" "$BIN/idxg-build"
+ln -sfn "$REPO/bin/idxg-history" "$BIN/idxg-history"
 ln -sfn "$REPO/skill/ios-codebase-indexer" "$SKILLS/ios-codebase-indexer"
-echo "linked idxg, idxg-build -> $BIN"
+echo "linked idxg, idxg-build, idxg-history -> $BIN"
 echo "linked skill           -> $SKILLS/ios-codebase-indexer"
 
 if command -v claude >/dev/null 2>&1; then

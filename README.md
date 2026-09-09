@@ -78,8 +78,21 @@ The second one answers "who calls this", with the exact call sites.
 idxg open
 ```
 
-Three tabs: overview, a cross-module call graph where clicking a module isolates its
-calls, and a symbol browser with callers and callees.
+Six tabs: overview, a cross-module call graph where clicking a module isolates its
+calls, a symbol browser with callers and callees, dead-code candidates, the project's
+history told period by period, and the repository's own docs.
+
+**6b. Ask about the past.**
+
+```bash
+idxg history timeline                     # the project's history in prose
+idxg history log --symbol MyReducer       # who changed it, when, in which PR
+idxg docs search "dependency injection"   # the repo's markdown docs, full text
+```
+
+`idxg init` and every `idxg-build` extract the main branch's `git log` and the tracked
+markdown docs into a second database beside the graph. See
+[History and docs](#history-and-docs) for what is in it and what it cannot tell you.
 
 **7. Keep it fresh.**
 
@@ -125,6 +138,20 @@ idxg coverage Sources/Feature             # what the compiled index actually cov
 idxg sql "SELECT kind, COUNT(*) n FROM symbols WHERE in_repo=1 GROUP BY kind"
 idxg viz --scope MyModule --open          # HTML explorer
 idxg schema                               # tables, edge kinds, role bits
+
+idxg history build                        # git log of main + repo docs -> <project>-history.db
+idxg history log Sources/Feature/ --files # commits touching a path, with changed files
+idxg history log --symbol MyType          # commits touching the file that defines a symbol
+idxg history log --narrate --since 2026-09-01   # one plain paragraph per commit: who, what, why
+idxg history show '#1234'                 # one commit or PR in full: description, files, modules
+idxg history digest                       # this week, every change narrated and grouped by area
+idxg history digest --week 2026-W36 --html --open   # the same as a standalone digest page
+idxg history churn --by module            # where change concentrated in the last year
+idxg history timeline --periods 4         # narrative history, one paragraph per period
+idxg history vault --out ~/my-vault       # history and docs as knowledge-vault clippings
+idxg docs list --module MyModule          # a module's README, CLAUDE.md, design docs
+idxg docs search "path resolver"          # full-text search over the docs
+idxg docs show Documentation/Testing.md   # print one doc
 ```
 
 Every query command takes `--json`, and `--db <path>` to point at another project's
@@ -174,11 +201,78 @@ over camel-split names. Edges are normalized to `src -> dst`:
 Every edge row carries the source location of the relation, so "who calls this" comes
 back with call sites, not just names.
 
+## History and docs
+
+The code graph says what the code is. A second database, `<project>-history.db` beside
+the graph, says how it got there and what the repository says about itself.
+
+**Commit history.** `idxg history build` runs `git log --first-parent` on the history
+branch (`main`, then `master`, unless `idxg config history_branch=...` says otherwise), so
+each row is one merge to that branch with its full diff stats, message body, PR number
+and ticket keys. Runs are incremental: after the first one only new commits are read.
+Every changed file is attributed to a module by the directory prefix the graph knows for
+that module, and to a component directory at module depth. From that come `log`, `show`,
+`churn` and `timeline`.
+
+**Pull request descriptions.** Squash merges usually drop the PR description from the
+commit, and that description is where "why" lives. When `gh` is installed and logged in,
+the build fetches title, body, labels and merge date for every PR-numbered commit through
+the GitHub GraphQL API, forty per request, and only for commits it has not seen. Turn it
+off with `idxg config history_prs=false` or `--no-prs`.
+
+**Narration, commit by commit.** `idxg history log --narrate`, `idxg history show` and the
+explorer's history tab write one plain paragraph per commit: who merged what and when,
+the sentences of the PR description that say what changed and why (template sections
+whose heading mentions what, why or context are preferred), which files and modules it
+touched and how, renames, labels. Every clause maps to a field of the commit.
+
+**Weekly digest.** `idxg history digest` narrates a week: headline and stats, the changes
+that stood out (hotfixes and fixes first, then the largest), then every change grouped by
+area. Areas are ordered the way the code depends on itself, using the graph's cross-module
+call counts: tooling first, modules the rest of the code calls next, leaf features later,
+tests and docs last; one-change modules fold into shared "Other" tiles with a subhead per
+module. `--html` writes the digest as a page in the fixed layout the knowledge vault's
+weekly digest uses (`src/templates/weekly-digest.html`, two placeholders, nothing else
+changes), and the explorer embeds the most recent weeks (`viz_history_weeks`, default 26)
+in that same layout.
+
+**Narrative timeline.** `idxg history timeline` and the explorer's history tab tell the
+project's history one paragraph per year, quarter or month depending on the span. Every
+sentence is computed: commit and author counts, most touched modules, subject words that
+are distinctive for the period, directories that first appear or were last touched, the
+largest change. It is a factual digest, not an interpretation.
+
+**Repository docs.** The same build collects every tracked markdown file (vendored trees
+and changelogs excluded, or the include and exclude globs of a JSON manifest named by
+`idxg config docs_manifest=...`), with its last-commit date, a `Last refreshed:` date when
+the doc has generated sections, and a module attribution. `idxg docs search` is a BM25
+full-text search over their content.
+
+**Vault export.** `idxg history vault --out <dir>` writes the docs, the period
+narratives and one note per module into `<dir>/Clippings/` in the shape an LLM-maintained
+knowledge vault compiles from: frontmatter with `source`, `path`, `url`, `published`,
+`hash`; a file is never rewritten, and a changed source becomes a new date-suffixed
+clipping. Point it at an existing vault with `--out` or `idxg config history_vault=...`.
+
+Limits, stated once here and again in the output:
+
+- A commit is whatever the branch records. Squash merges make one row per PR; a rebased
+  or force-pushed branch triggers a full re-extract.
+- Module attribution follows the compiled index. A file the build never compiled belongs
+  to no module, so per-module counts are lower bounds and `--module` filters miss it.
+  Filter by path when that matters.
+- `--symbol` follows the file that defines the symbol. Line-level history is not tracked,
+  so unrelated edits to the same file appear too.
+- A doc's `published` date is its last commit, not the date its content is true. Where a
+  doc and the graph disagree, the graph reflects the compiled code.
+
 ## For coding agents
 
 The MCP server exposes `index_status`, `search_graph`, `trace_path`, `find_references`,
 `get_code_snippet`, `query_graph`, `check_index_coverage`, `get_architecture`,
-`get_schema` and `build_visualizer`. It resolves the database from the session's working
+`get_schema`, `build_visualizer`, and for history and docs `get_history`, `get_commit`,
+`get_churn`, `get_timeline`, `get_digest`, `list_docs`, `search_docs`, `get_doc` and
+`refresh_history`. `get_history` takes `narrate` for one paragraph per commit. It resolves the database from the session's working
 directory. The bundled skill tells an agent when to reach for the graph instead of grep,
 and which gotchas to respect.
 
@@ -203,6 +297,9 @@ and which gotchas to respect.
 - `src/idxg.py` is the query layer.
 - `src/viz.py` renders the HTML explorer (overview, cross-module call graph with
   click-to-isolate, symbol explorer with callers and callees).
+- `src/history.py` extracts `git log` and the tracked markdown docs into
+  `<project>-history.db`, attributes paths to modules through the graph, and writes the
+  narrative and the vault export.
 - `src/mcp_server.py` is a stdio MCP server wrapping the same commands.
 
 MIT licensed.

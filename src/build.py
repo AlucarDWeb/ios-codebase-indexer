@@ -230,6 +230,13 @@ def normalize(path, root, prefix_map):
     return p, None, 0
 
 
+def _manifest(root, cfg):
+    m = cfg.get("docs_manifest") or ""
+    if not m:
+        return None
+    return m if os.path.isabs(os.path.expanduser(m)) else os.path.join(root, m)
+
+
 def chunks(seq, n):
     k = max(1, (len(seq) + n - 1) // n)
     return [seq[i:i + k] for i in range(0, len(seq), k)]
@@ -246,6 +253,8 @@ def main():
     ap.add_argument("--viz", dest="viz", action="store_true", default=None,
                     help="regenerate the HTML explorer after building (default: config viz_on_build)")
     ap.add_argument("--no-viz", dest="viz", action="store_false")
+    ap.add_argument("--no-history", action="store_true",
+                    help="skip the commit-history and docs refresh that follows the build")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -448,6 +457,14 @@ def main():
     db_path = final_db
     prj.register(root, db_path, stores, {"symbols": stats["symbols"], "edges": stats["edges"]})
     html = None
+    if cfg.get("history_on_build", True) and not args.no_history:
+        import history
+        try:
+            history.build(root, db_path, branch=cfg.get("history_branch") or None,
+                          first_parent=cfg.get("history_first_parent", True),
+                          prs=cfg.get("history_prs", True), manifest_path=_manifest(root, cfg))
+        except SystemExit as e:
+            print(f"history skipped: {e}", file=sys.stderr)
     if args.viz if args.viz is not None else cfg.get("viz_on_build", True):
         import viz
         import sqlite3 as _sq
@@ -456,6 +473,7 @@ def main():
         data = viz.slice_data(vdb, scope=cfg.get("viz_scope") or None,
                               limit=cfg.get("viz_limit", 1500), edge_cap=30000,
                               per_node_cap=cfg.get("viz_per_node_cap", 25))
+        viz.attach_history(data, db_path, weeks=cfg.get("viz_history_weeks", 26))
         html = os.path.join(os.path.dirname(db_path),
                             os.path.basename(db_path).replace(".db", "-explorer.html"))
         viz.render(data, html)

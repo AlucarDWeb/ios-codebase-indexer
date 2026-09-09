@@ -15,6 +15,13 @@ DEFAULT_CONFIG = {
     "poll_minutes": 15,               # autoindex agent interval (global only)
     "jobs": max(2, (os.cpu_count() or 4) - 2),
     "claude_md_path": "",             # where init writes the agent note (blank = CLAUDE.md)
+    "history_on_build": True,         # refresh commit history and docs after every graph build
+    "history_branch": "",             # branch whose log is the project's history (blank = main/master)
+    "history_first_parent": True,     # one commit per merge on that branch, not every branch commit
+    "docs_manifest": "",              # JSON with include/exclude globs for repo docs (blank = all tracked .md)
+    "history_vault": "",              # default directory for idxg history vault (blank = beside the db)
+    "history_prs": True,              # fetch pull request descriptions through gh when it is logged in
+    "viz_history_weeks": 26,          # weekly digests embedded in the explorer
 }
 
 GLOBAL_ONLY = ("poll_minutes",)
@@ -28,6 +35,13 @@ CONFIG_HELP = {
     "poll_minutes": "autoindex agent interval, global only",
     "jobs": "parallel extractor workers",
     "claude_md_path": "where init writes the agent note (blank = <project>/CLAUDE.md)",
+    "history_on_build": "refresh commit history and repo docs after every graph build",
+    "history_branch": "branch whose log is the project's history (blank = main, then master)",
+    "history_first_parent": "count one commit per merge on the history branch",
+    "docs_manifest": "JSON file with include/exclude globs for repo docs (blank = every tracked .md)",
+    "history_vault": "where idxg history vault writes by default (blank = <db dir>/<project>-vault)",
+    "history_prs": "fetch pull request descriptions through gh (needs gh auth login)",
+    "viz_history_weeks": "how many weekly digests the explorer embeds",
 }
 
 
