@@ -540,6 +540,7 @@ def cmd_schema(a):
 CLAUDE_START = "<!-- ios-codebase-indexer:start -->"
 CLAUDE_END = "<!-- ios-codebase-indexer:end -->"
 LAUNCH_LABEL = "com.ios-codebase-indexer.autoindex"
+NOTES_MARKER = "## Project notes"
 
 
 def project_stats(db_file):
@@ -611,8 +612,22 @@ USR; ambiguous names list candidates unless you pass `--first`.
 Largest modules: {', '.join(mods[:12])}.
 
 Visual explorer: `idxg open` (cross-module call graph, symbol browser).
+
+{NOTES_MARKER}
+
+Anything below this line is yours: project-specific gotchas, build quirks, which targets
+the index actually covers. `idxg init` regenerates everything above it and leaves this
+section untouched.
 """
     path = os.path.join(d, "SKILL.md")
+    keep = ""
+    if os.path.exists(path):
+        with open(path) as f:
+            old = f.read()
+        if NOTES_MARKER in old:
+            keep = old[old.index(NOTES_MARKER) + len(NOTES_MARKER):].lstrip("\n")
+    if keep:
+        body = body[:body.index(NOTES_MARKER) + len(NOTES_MARKER)] + "\n\n" + keep
     with open(path, "w") as f:
         f.write(body)
     return path
