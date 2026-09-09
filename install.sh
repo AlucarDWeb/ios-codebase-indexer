@@ -16,9 +16,11 @@ echo "linked skill           -> $SKILLS/codebase-brain"
 
 if command -v claude >/dev/null 2>&1; then
     claude mcp remove --scope user ios-codebase-indexer >/dev/null 2>&1 || true
-    if claude mcp list 2>/dev/null | grep -q "^codebase-brain:"; then
+    # Re-register when the repo moved: the registration stores the absolute script path.
+    if claude mcp get codebase-brain 2>/dev/null | grep -q "$REPO/src/mcp_server.py"; then
         echo "mcp server already registered"
     else
+        claude mcp remove --scope user codebase-brain >/dev/null 2>&1 || true
         claude mcp add --scope user codebase-brain -- python3 "$REPO/src/mcp_server.py" \
             && echo "registered mcp server (restart Claude Code to pick it up)"
     fi
