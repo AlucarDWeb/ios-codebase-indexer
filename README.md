@@ -22,7 +22,91 @@ That links `idxg` and `idxg-build` into `~/.local/bin`, links the Claude Code sk
 Requirements: macOS with Xcode installed (for `libIndexStore.dylib`) and Python 3.9+.
 No third-party packages.
 
-## Use
+## First run, step by step
+
+**1. Check the CLI is on your PATH.**
+
+```bash
+idxg --help
+```
+
+If that fails, add `~/.local/bin` to your PATH, or re-run `./install.sh` and read its
+last line.
+
+**2. Make sure the project has an index store.** This is the one prerequisite, and
+nothing works without it. The compiler writes the store during a build or during
+sourcekit-lsp's background indexing:
+
+- SwiftPM or Xcode project: open it in an editor with sourcekit-lsp background indexing
+  on, or just build it once.
+- Bazel: build with `--features=swift.index_while_building`, or set up
+  [sourcekit-bazel-bsp](https://github.com/spotify/sourcekit-bazel-bsp).
+
+**3. Index the project.**
+
+```bash
+cd /path/to/your/project
+idxg init
+```
+
+It prints the stores it found, builds the graph, renders the explorer, and installs the
+project skill and CLAUDE.md note. Expect seconds on a small package, two to three minutes
+on a large monorepo. If it reports no index store, go back to step 2.
+
+**4. See what you got, and what it does not cover.**
+
+```bash
+idxg status
+```
+
+The coverage line is the one to read. It counts tracked sources that have index records.
+A low number is not a bug: it means much of the project was never compiled in the build
+that produced the store. Build more targets and re-run `idxg refresh` to raise it.
+
+**5. Try a query.**
+
+```bash
+idxg search "<something you know exists>"
+idxg trace <ASymbolFromThatSearch> --direction in --first
+```
+
+The second one answers "who calls this", with the exact call sites.
+
+**6. Look at it.**
+
+```bash
+idxg open
+```
+
+Three tabs: overview, a cross-module call graph where clicking a module isolates its
+calls, and a symbol browser with callers and callees.
+
+**7. Keep it fresh.**
+
+```bash
+idxg autoindex --install --every 20
+```
+
+A launchd agent then reindexes any registered project whose store has changed. Without
+it, run `idxg refresh` after builds; queries warn on stderr when the graph has fallen
+behind.
+
+**8. Restart your agent.** The MCP server was registered at install time, but an already
+running Claude Code session will not see it until you restart. The project skill and the
+CLAUDE.md note are picked up per project with no restart needed.
+
+### If something looks wrong
+
+| Symptom | Cause and fix |
+|---|---|
+| `no index store found` | Nothing has compiled this project yet. See step 2. |
+| `no graph for <path>` | Indexed elsewhere or not yet. Run `idxg init`, or `idxg projects` to see what is registered. |
+| Coverage far below 100% | Only compiled targets have records. Build the missing targets, then `idxg refresh`. |
+| A symbol resolves to several candidates | Pass `--first`, or give `Module.Name` or the USR. |
+| Line numbers are off | The graph predates your edits. `idxg refresh`. |
+| `.m` files missing | ObjC needs a build-system change. See [docs/objc-index-store.md](docs/objc-index-store.md). |
+
+## Command reference
 
 ```bash
 cd /path/to/your/project
