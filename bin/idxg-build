@@ -1,0 +1,4 @@
+#!/bin/sh
+# ios-codebase-indexer: index builder
+SELF=$(cd "$(dirname "$0")" && pwd)
+exec python3 "$SELF/../src/build.py" "$@"

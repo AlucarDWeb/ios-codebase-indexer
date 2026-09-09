@@ -1,0 +1,4 @@
+#!/bin/sh
+# ios-codebase-indexer: query CLI
+SELF=$(cd "$(dirname "$0")" && pwd)
+exec python3 "$SELF/../src/idxg.py" "$@"
