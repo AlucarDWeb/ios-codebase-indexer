@@ -78,7 +78,8 @@ def _path_layer(rel, depth=2):
     return parts[0] if len(parts) <= depth else "/".join(parts[:depth])
 
 
-def slice_data(db, scope=None, limit=3000, edge_cap=60000, per_node_cap=45):
+def slice_data(db, scope=None, limit=3000, edge_cap=60000, per_node_cap=45, detail_cap=12,
+               dead_cap=600):
     cur = db.cursor()
     cur.row_factory = None
     meta = {r[0]: r[1] for r in cur.execute("SELECT key, value FROM meta")}
@@ -95,6 +96,17 @@ def slice_data(db, scope=None, limit=3000, edge_cap=60000, per_node_cap=45):
                              FROM symbols WHERE in_repo=1 AND module IS NOT NULL AND module != ''
                              GROUP BY module ORDER BY syms DESC""").fetchall()
     modules = [list(r) for r in modules]
+    lookup = db.cursor()
+    lookup.row_factory = None
+    ecur = db.cursor()
+    ecur.row_factory = None
+    ph_cache = {}
+
+    def relpath(ph):
+        if ph not in ph_cache:
+            r = lookup.execute("SELECT COALESCE(rel, path) FROM files WHERE path_hash=?", (ph,)).fetchone()
+            ph_cache[ph] = r[0] if r else ""
+        return ph_cache[ph]
     mod_edges = cur.execute("""SELECT a.module, b.module, COUNT(*) n FROM edges e
                                JOIN symbols a ON a.usr_hash = e.src
                                JOIN symbols b ON b.usr_hash = e.dst
@@ -103,6 +115,31 @@ def slice_data(db, scope=None, limit=3000, edge_cap=60000, per_node_cap=45):
                                  AND a.module != b.module
                                GROUP BY 1,2 HAVING COUNT(*) >= 3 ORDER BY 3 DESC LIMIT 1200""").fetchall()
     mod_edges = [list(r) for r in mod_edges]
+
+    # The panel only renders pairs among the top modules, so only those need detail.
+    size_by_mod = {m: n for m, n, *_ in modules}
+    shown = set(sorted({m for e in mod_edges for m in e[:2]},
+                       key=lambda m: -size_by_mod.get(m, 0))[:45])
+    wanted = {(a, b) for a, b, n in mod_edges if a in shown and b in shown and n >= 8}
+    mod_edge_details = {}
+    if wanted:
+        rows = cur.execute("""SELECT a.module, b.module, a.name, b.name, COUNT(*) n,
+                                     MIN(e.path_hash), MIN(e.line)
+                              FROM edges e
+                              JOIN symbols a ON a.usr_hash = e.src
+                              JOIN symbols b ON b.usr_hash = e.dst
+                              WHERE e.kind='CALLS' AND a.in_repo=1 AND b.in_repo=1
+                                AND a.module IS NOT NULL AND b.module IS NOT NULL
+                                AND a.module <> b.module
+                              GROUP BY e.src, e.dst
+                              ORDER BY 1, 2, 5 DESC""").fetchall()
+        for am, bm, caller, callee, n, ph, line in rows:
+            if (am, bm) not in wanted:
+                continue
+            bucket = mod_edge_details.setdefault(f"{am}>{bm}", [])
+            if len(bucket) >= detail_cap:
+                continue
+            bucket.append([caller, callee, relpath(ph) if ph else "", line or 0, n])
 
     where = "s.in_repo = 1"
     args = []
@@ -118,17 +155,6 @@ def slice_data(db, scope=None, limit=3000, edge_cap=60000, per_node_cap=45):
     nodes = [{"n": r[1], "k": r[2], "m": r[3] or "", "f": r[4] or "", "l": r[5] or 0,
               "i": r[6], "o": r[7], "ci": r[8], "co": r[9], "rc": r[10]} for r in rows]
     extra, edges = {}, []
-    ph_cache = {}
-    lookup = db.cursor()
-    lookup.row_factory = None
-    ecur = db.cursor()
-    ecur.row_factory = None
-
-    def relpath(ph):
-        if ph not in ph_cache:
-            r = lookup.execute("SELECT COALESCE(rel, path) FROM files WHERE path_hash=?", (ph,)).fetchone()
-            ph_cache[ph] = r[0] if r else ""
-        return ph_cache[ph]
 
     def node_id(uh):
         if uh in ids:
@@ -172,8 +198,24 @@ def slice_data(db, scope=None, limit=3000, edge_cap=60000, per_node_cap=45):
         if a is None or b is None:
             continue
         edges.append([a, b, kind, relpath(ph) if ph else "", line or 0, n])
+    dead, total_dead = [], 0
+    import sqlite3 as _sq
+    prior_factory = db.row_factory
+    try:
+        import deadcode
+        db.row_factory = _sq.Row
+        total_dead, rows = deadcode.candidates(db, limit=dead_cap)  # Swift, non-vendored
+        dead = [[r["name"], r["kind"], r["module"] or "", r["rel"] or "", r["def_line"] or 0]
+                for r in rows]
+    except Exception:
+        pass
+    finally:
+        db.row_factory = prior_factory
+
     return {"meta": meta, "counts": counts, "edge_kinds": ekinds, "sym_kinds": kinds,
+            "dead": dead, "dead_total": total_dead,
             "layers": layers, "modules": modules, "mod_edges": mod_edges,
+            "mod_edge_details": mod_edge_details,
             "nodes": nodes, "edges": edges, "slice_size": len(ids), "scope": scope or "repo"}
 
 
@@ -187,11 +229,13 @@ BODY = """
   <button data-tab="overview" class="on">overview</button>
   <button data-tab="modules">modules</button>
   <button data-tab="symbols">symbols</button>
+  <button data-tab="dead">dead code</button>
 </nav>
 <main>
   <section id="overview"></section>
   <section id="modules" hidden></section>
   <section id="symbols" hidden></section>
+  <section id="dead" hidden></section>
 </main>
 <footer>
   built __BUILT__ from index-store format v__FMT__ &middot; slice: __SLICE__ symbols, __EDGECOUNT__ edges
@@ -381,8 +425,8 @@ function selectModule(i) {
   }
   info.append(kv);
   const g = el('div', 'grid2');
-  g.append(modTree(`callers (inbound)`, ins, l => l.s, 'var(--accent)'));
-  g.append(modTree(`callees (outbound)`, outs, l => l.t, 'var(--warn)'));
+  g.append(modTree(`callers (inbound)`, ins, l => l.s, 'var(--accent)', true));
+  g.append(modTree(`callees (outbound)`, outs, l => l.t, 'var(--warn)', false));
   info.append(g);
   const jump = el('div');
   const b = el('a', null, `browse ${name} symbols`);
@@ -392,7 +436,7 @@ function selectModule(i) {
   info.append(jump);
 }
 
-function modTree(title, rows, pick, color) {
+function modTree(title, rows, pick, color, inbound) {
   const c = el('div');
   const h = el('h2', null, `${title}: ${rows.length}`); h.style.color = color;
   c.append(h);
@@ -401,6 +445,7 @@ function modTree(title, rows, pick, color) {
   const shown = rows.slice(0, 40);
   shown.forEach((l, i) => {
     const other = modState.names[pick(l)];
+    const self = modState.names[modState.sel];
     const last = i === shown.length - 1;
     const line = el('div');
     line.append(document.createTextNode(last ? '\u2514\u2500 ' : '\u251c\u2500 '));
@@ -410,6 +455,38 @@ function modTree(title, rows, pick, color) {
     const tail = el('span', 'loc',
       `  Module <CALLS>  ${fmt(modState.size.get(other) || 0)} symbols (x${fmt(l.n)})`);
     line.append(tail);
+    const key = inbound ? `${other}>${self}` : `${self}>${other}`;
+    const detail = (D.mod_edge_details || {})[key] || [];
+    if (detail.length) {
+      const toggle = el('a', null, '  functions');
+      toggle.style.color = 'var(--dim)';
+      line.append(toggle);
+      const kids = el('div');
+      kids.hidden = true;
+      kids.style.paddingLeft = last ? '18px' : '18px';
+      kids.style.borderLeft = last ? 'none' : '1px solid var(--line)';
+      detail.forEach((d, j) => {
+        const [caller, callee, file, ln, n] = d;
+        const row = el('div');
+        const dlast = j === detail.length - 1;
+        row.append(document.createTextNode(dlast ? '\u2514\u2500 ' : '\u251c\u2500 '));
+        const cf = el('span', null, caller); cf.style.color = 'var(--accent2)';
+        const ce = el('span', null, callee); ce.style.color = 'var(--warn)';
+        row.append(cf, document.createTextNode(' \u2192 '), ce);
+        const where = el('span', 'loc',
+          `  ${file ? file.split('/').pop() + ':' + ln : ''}${n > 1 ? `  (x${fmt(n)})` : ''}`);
+        where.title = file ? `${file}:${ln}` : '';
+        row.append(where);
+        kids.append(row);
+      });
+      toggle.onclick = ev => {
+        ev.stopPropagation();
+        kids.hidden = !kids.hidden;
+        toggle.textContent = kids.hidden ? '  functions' : '  hide';
+      };
+      pre.append(line, kids);
+      return;
+    }
     pre.append(line);
   });
   if (rows.length > shown.length) pre.append(el('div', 'loc', `... ${rows.length - shown.length} more`));
@@ -629,13 +706,94 @@ function neighborhood(i) {
   return c;
 }
 
+/* ---------- dead code ---------- */
+function deadTab() {
+  const s = document.getElementById('dead');
+  if (s.dataset.init) return;
+  s.dataset.init = '1';
+  const cov = D.meta.coverage ? `${D.meta.coverage} tracked sources carry index records` +
+    (D.meta.coverage_pct ? ` (${D.meta.coverage_pct}%)` : '') : 'coverage unknown';
+  const warn = el('div', 'card');
+  warn.style.borderColor = 'var(--warn)';
+  warn.append(el('h2', null, 'read this first'));
+  const p = el('div');
+  p.innerHTML = `These are symbols that nothing in <em>the indexed build</em> reaches: no call,
+    no reference, no override, and no occurrence beyond their own definition. Structural
+    edges are ignored, and members of types conforming to Codable, Equatable, View and
+    friends are excluded because the compiler synthesises their uses.
+    <br><br>This is a candidate list, not a verdict. ${cov}, so a symbol used only from
+    files the build never compiled appears here wrongly. Confirm with
+    <code>idxg dead --verify</code>, which drops any candidate whose identifier appears in
+    another file.`;
+  warn.append(p);
+  s.append(warn);
+
+  const byKind = {}, byModule = {};
+  for (const [, kind, mod] of D.dead) {
+    byKind[kind] = (byKind[kind] || 0) + 1;
+    if (mod) byModule[mod] = (byModule[mod] || 0) + 1;
+  }
+  const tiles = el('div', 'tiles');
+  for (const [k, v] of [['candidates', D.dead_total], ['listed here', D.dead.length],
+                        ['kinds', Object.keys(byKind).length],
+                        ['modules', Object.keys(byModule).length]]) {
+    const d = el('div', 'tile'); d.append(el('div', 'n', fmt(v)), el('div', 'k', k)); tiles.append(d);
+  }
+  s.append(tiles);
+
+  const g = el('div', 'grid2');
+  g.append(barCard('candidates by kind', Object.entries(byKind).sort((a, b) => b[1] - a[1])));
+  g.append(barCard('candidates by module',
+                   Object.entries(byModule).sort((a, b) => b[1] - a[1]).slice(0, 20)));
+  s.append(g);
+
+  const list = el('div', 'card');
+  list.append(el('h2', null, `candidates (${D.dead.length} shown of ${fmt(D.dead_total)})`));
+  const filters = el('div', 'filters');
+  filters.innerHTML = `<input type="text" id="deadq" placeholder="filter by name, module or path">
+    <select id="deadkind"></select>`;
+  list.append(filters);
+  const rows = el('div', 'rows'); rows.id = 'deadrows';
+  list.append(rows);
+  s.append(list);
+  const sel = document.getElementById('deadkind');
+  sel.innerHTML = '<option value="">all kinds</option>' +
+    Object.keys(byKind).sort().map(k => `<option>${k}</option>`).join('');
+  document.getElementById('deadq').addEventListener('input', renderDead);
+  sel.addEventListener('input', renderDead);
+  renderDead();
+}
+
+function renderDead() {
+  const q = (document.getElementById('deadq').value || '').toLowerCase();
+  const kind = document.getElementById('deadkind').value;
+  const box = document.getElementById('deadrows');
+  box.innerHTML = '';
+  let group = null, n = 0;
+  for (const [name, k, mod, file, line] of D.dead) {
+    if (kind && k !== kind) continue;
+    if (q && !(name.toLowerCase().includes(q) || (mod || '').toLowerCase().includes(q) ||
+               (file || '').toLowerCase().includes(q))) continue;
+    if (n++ > 400) break;
+    const g = `${mod || '?'} (${file || 'external'})`;
+    if (g !== group) { group = g; box.append(el('div', 'group', g)); }
+    const row = el('div', 'row');
+    row.append(el('span', 'nm', name), el('span', 'badge', k),
+               el('span', 'meta', `:${line}`));
+    row.onclick = () => { showTab('symbols'); document.getElementById('q').value = name; render(); };
+    box.append(row);
+  }
+  if (!n) box.append(el('div', 'empty', 'nothing matches'));
+}
+
 /* ---------- tabs ---------- */
 function showTab(name) {
   for (const b of document.querySelectorAll('nav button')) b.classList.toggle('on', b.dataset.tab === name);
-  for (const id of ['overview', 'modules', 'symbols'])
+  for (const id of ['overview', 'modules', 'symbols', 'dead'])
     document.getElementById(id).hidden = id !== name;
   if (name === 'modules' && !modState) modulesTab();
   if (name === 'symbols') symbolsTab();
+  if (name === 'dead') deadTab();
 }
 for (const b of document.querySelectorAll('nav button')) b.onclick = () => showTab(b.dataset.tab);
 document.getElementById('themeToggle').onclick = () => {

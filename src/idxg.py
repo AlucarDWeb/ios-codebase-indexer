@@ -4,6 +4,7 @@ import argparse, json, os, re, sqlite3, subprocess, sys, textwrap
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import project as prj
+import deadcode
 
 KIND_BOOST = {"Function": 10, "InstanceMethod": 10, "ClassMethod": 10, "StaticMethod": 10,
               "Constructor": 8, "Class": 5, "Struct": 5, "Protocol": 5, "Enum": 5, "Extension": 3}
@@ -517,6 +518,47 @@ def cmd_viz(a):
     if a.open:
         subprocess_open = __import__("subprocess")
         subprocess_open.run(["open", out])
+
+
+def cmd_dead(a):
+    db = connect(a.db)
+    m = meta(db)
+    root = m.get("repo_root", "")
+    total, rows = deadcode.candidates(db, kinds=a.kind.split(",") if a.kind else None,
+                                      module=a.module, include_tests=a.include_tests,
+                                      limit=a.limit, offset=a.offset, lang=a.lang,
+                                      include_vendor=a.include_vendor)
+    out = []
+    for r in rows:
+        item = {"name": r["name"], "kind": r["kind"], "module": r["module"],
+                "file": r["rel"], "line": r["def_line"], "usr": r["usr"]}
+        if a.verify and root:
+            others, same_file = deadcode.mentions(root, r["name"], r["rel"] or "")
+            item["mentions"] = others[:5]
+            item["mention_count"] = len(others)
+            item["same_file_mentions"] = same_file
+            if others:
+                continue
+        out.append(item)
+    if a.json:
+        print(json.dumps({"total_candidates": total, "returned": len(out),
+                          "verified": bool(a.verify), "candidates": out}, indent=2))
+        return
+    cov = ""
+    print(f"dead-code candidates: {total}" + (f", {len(out)} survive the text check" if a.verify else ""))
+    print("only as good as the index: a symbol used solely from files the build never")
+    print("compiled looks unreachable here. Check `idxg status` coverage first.\n")
+    group = None
+    for item in out:
+        g = f"{item['module'] or '?'} ({item['file'] or 'external'})"
+        if g != group:
+            group = g
+            print(f"\n{group}:")
+        same = item.get("same_file_mentions") or 0
+        hint = f"  ({same} same-file mention{'s' if same != 1 else ''}, check overloads)" if same else ""
+        print(f"  {item['name']}  {item['kind']}:{item['line']}{hint}")
+    if not a.verify:
+        print("\nadd --verify to drop candidates whose name appears in any other file")
 
 
 def cmd_schema(a):
@@ -1034,6 +1076,22 @@ def build_parser():
                    help="max edges kept per symbol per direction (default: config viz_per_node_cap)")
     p.add_argument("--title"); p.add_argument("--open", action="store_true")
     p.set_defaults(fn=cmd_viz)
+
+    p = sub.add_parser("dead", help="symbols nothing in the indexed build reaches")
+    p.add_argument("--kind", help="comma list, default: types, methods and properties")
+    p.add_argument("--module")
+    p.add_argument("--include-tests", action="store_true")
+    p.add_argument("--include-vendor", action="store_true",
+                   help="include vendored trees (third-party, Vendor, Pods)")
+    p.add_argument("--lang", default="Swift",
+                   help="Swift (default), ObjC, C, or any. ObjC selectors are dispatched "
+                        "dynamically, so ObjC candidates are mostly false positives")
+    p.add_argument("--verify", action="store_true",
+                   help="drop candidates whose name appears in any other file (ripgrep)")
+    p.add_argument("--limit", type=int, default=200)
+    p.add_argument("--offset", type=int, default=0)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_dead)
 
     p = sub.add_parser("schema", help="print the db schema and edge/role vocabulary")
     p.set_defaults(fn=cmd_schema)
