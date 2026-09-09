@@ -1,4 +1,12 @@
 #!/bin/sh
-# ios-codebase-indexer: index builder
-SELF=$(cd "$(dirname "$0")" && pwd)
-exec python3 "$SELF/../src/build.py" "$@"
+# ios-codebase-indexer, resolving symlinks so an installed link still finds src/
+SELF=$0
+while [ -L "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case $LINK in
+        /*) SELF=$LINK ;;
+        *) SELF=$(dirname "$SELF")/$LINK ;;
+    esac
+done
+DIR=$(cd "$(dirname "$SELF")" && pwd)
+exec python3 "$DIR/../src/build.py" "$@"

@@ -149,7 +149,7 @@ def cmd_status(a):
     if tracked:
         print(f"\ncoverage: {covered:,}/{tracked:,} tracked sources have index records "
               f"({100*covered/tracked:.1f}%)")
-        print("  a file with no records was never compiled by the BSP build; grep it instead.")
+        print("  a file with no records was never compiled in the indexed build; grep it instead.")
 
 
 def cmd_coverage(a):
