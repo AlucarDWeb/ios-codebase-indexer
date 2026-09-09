@@ -18,6 +18,7 @@ relation. Prefer it over grep for structure, and over a parser-derived graph alw
 | find a symbol, filter by kind/module/file/degree | `idxg search` |
 | module-level coupling, layer counts, hotspots | `idxg arch` |
 | anything expressible as SQL over symbols/edges | `idxg sql` |
+| unused code, dead-code candidates | `idxg dead --verify` |
 | literal text, comments, strings, uncompiled files | ripgrep |
 | files the compiled build never touched | `idxg coverage` first, then ripgrep |
 
@@ -34,6 +35,7 @@ idxg refs MyType
 idxg snippet MyType
 idxg sql "SELECT kind, COUNT(*) n FROM symbols WHERE in_repo=1 GROUP BY kind ORDER BY n DESC"
 idxg arch
+idxg dead --verify --module MyModule
 idxg coverage Sources/Feature SomeFile.swift
 idxg viz --scope MyModule --open
 idxg schema
@@ -91,6 +93,10 @@ directory's name.
   under test. Filter those when reading `arch` output.
 - **Symbols with no definition site** are declared only in a module interface the build
   consumed without source, so `snippet` cannot show them.
+- **Dead-code output is capped by coverage.** `idxg dead` defaults to Swift, skips
+  vendored trees, entry points, protocol witnesses and synthesis-driven members, and
+  still cannot see references from files the build never compiled. Always pass
+  `--verify`, and report survivors as candidates rather than as unused code.
 - **`idxg viz` size scales with the slice.** Repo-wide defaults to the top 1500 symbols
   by degree; `--scope <Module>` includes every symbol in that module. Keep
   `--per-node-cap` near 14 to stay under ~8 MB.

@@ -120,6 +120,7 @@ idxg trace MyView --kind CALLS,REFERENCES --direction out --first
 idxg refs MyType                          # every occurrence, with roles
 idxg snippet MyType                       # definition, read from disk
 idxg arch                                 # layers, modules, hotspots, build targets
+idxg dead --verify                        # symbols nothing in the indexed build reaches
 idxg coverage Sources/Feature             # what the compiled index actually covers
 idxg sql "SELECT kind, COUNT(*) n FROM symbols WHERE in_repo=1 GROUP BY kind"
 idxg viz --scope MyModule --open          # HTML explorer
