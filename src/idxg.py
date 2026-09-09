@@ -60,7 +60,7 @@ def check_stale(args):
     if not stale:
         return
     root = m.get("repo_root")
-    cfg = prj.load_config()
+    cfg = prj.effective_config(root)
     if cfg.get("auto_refresh_on_query") or getattr(args, "refresh", False):
         print(f"graph is stale ({reason}); reindexing {root}", file=sys.stderr)
         build_now(root, quiet=True)
@@ -70,7 +70,7 @@ def check_stale(args):
 
 def build_now(root, jobs=None, quiet=False, viz=None):
     cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "build.py"),
-           "--root", root, "--jobs", str(jobs or prj.load_config().get("jobs", 4))]
+           "--root", root, "--jobs", str(jobs or prj.effective_config(root).get("jobs", 4))]
     if viz is False:
         cmd.append("--no-viz")
     out = subprocess.run(cmd, capture_output=quiet, text=True)
@@ -493,10 +493,13 @@ def cmd_viz(a):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import viz
     db = connect(a.db)
-    limit = a.limit if a.limit is not None else (20000 if a.scope else 1500)
-    data = viz.slice_data(db, scope=a.scope, limit=limit, edge_cap=a.edge_cap,
-                          per_node_cap=a.per_node_cap)
     m = meta(db)
+    cfgv = prj.effective_config(m.get("repo_root") or prj.find_root())
+    scope = a.scope or (cfgv.get("viz_scope") or None)
+    limit = a.limit if a.limit is not None else (20000 if scope else cfgv.get("viz_limit", 1500))
+    data = viz.slice_data(db, scope=scope, limit=limit, edge_cap=a.edge_cap,
+                          per_node_cap=a.per_node_cap if a.per_node_cap is not None
+                          else cfgv.get("viz_per_node_cap", 25))
     root = m.get("repo_root", "")
     if os.path.isdir(root):
         import subprocess
@@ -683,6 +686,42 @@ https://github.com/AlucarDWeb/ios-codebase-indexer and run `idxg init` here.
     return path, tracked
 
 
+def cmd_config(a):
+    root = prj.find_root()
+    scope_root = None if a.scope == "global" else root
+    if a.unset:
+        for key in a.unset:
+            where = prj.unset_config(key, scope_root)
+            print(f"unset {key}" + (f" ({where})" if where else " (was not set)"))
+    for pair in a.assign or []:
+        if "=" not in pair:
+            raise SystemExit(f"expected key=value, got {pair!r}")
+        key, value = pair.split("=", 1)
+        try:
+            where, val = prj.set_config(key.strip(), value.strip(), scope_root)
+        except ValueError as e:
+            raise SystemExit(str(e))
+        print(f"set {key.strip()} = {val}  ({where})")
+    if a.assign or a.unset:
+        print()
+    eff = prj.effective_config(root, with_source=True)
+    if a.json:
+        print(json.dumps({k: {"value": v, "source": src} for k, (v, src) in eff.items()}, indent=2))
+        return
+    print(f"project: {root}")
+    print(f"global:  {prj.CONFIG}")
+    w = max(len(k) for k in eff)
+    print(f"\n{'key'.ljust(w)}  {'value':<12} {'source':<8} what it does")
+    for k, (v, src) in sorted(eff.items()):
+        note = prj.CONFIG_HELP.get(k, "")
+        if k in prj.GLOBAL_ONLY:
+            note += " (global only)"
+        print(f"{k.ljust(w)}  {str(v):<12} {src:<8} {note}")
+    print("\nset for this project:  idxg config jobs=8 viz_limit=2500")
+    print("set globally:          idxg config --global poll_minutes=20")
+    print("clear an override:     idxg config --unset viz_limit")
+
+
 def cmd_init(a):
     root = os.path.realpath(os.path.expanduser(a.path)) if a.path else prj.find_root()
     stores, _ = prj.detect_stores(root)
@@ -710,7 +749,10 @@ def cmd_init(a):
     if a.skill:
         done.append(f"skill:    {install_project_skill(root, db)}")
     if a.claude_md:
-        path, tracked = install_claude_md(root, db, a.claude_md_path)
+        target = a.claude_md_path or (prj.effective_config(root).get("claude_md_path") or None)
+        if target and not os.path.isabs(target):
+            target = os.path.join(root, target)
+        path, tracked = install_claude_md(root, db, target)
         done.append(f"note:     {path}" + ("  (git-tracked, review before committing)" if tracked else ""))
     print("\ninstalled")
     for line in done:
@@ -828,7 +870,9 @@ def cmd_autoindex(a):
         print(f"removed {p}")
         return
     # install
-    minutes = a.every or prj.load_config().get("poll_minutes", 15)
+    minutes = a.every or prj.effective_config().get("poll_minutes", 15)
+    if a.every:
+        prj.set_config("poll_minutes", a.every, None)
     os.makedirs(prj.CACHE_DIR, exist_ok=True)
     p = plist_path()
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -919,7 +963,8 @@ def build_parser():
     p.add_argument("--limit", type=int, default=None,
                    help="symbols in the slice (default: all in scope, or top 1500 repo-wide; 0 = all)")
     p.add_argument("--edge-cap", type=int, default=30000)
-    p.add_argument("--per-node-cap", type=int, default=25, help="max edges kept per symbol per direction")
+    p.add_argument("--per-node-cap", type=int, default=None,
+                   help="max edges kept per symbol per direction (default: config viz_per_node_cap)")
     p.add_argument("--title"); p.add_argument("--open", action="store_true")
     p.set_defaults(fn=cmd_viz)
 
@@ -936,6 +981,14 @@ def build_parser():
     p.add_argument("--claude-md-path", dest="claude_md_path",
                    help="write the agent note here instead of <project>/CLAUDE.md")
     p.set_defaults(fn=cmd_init, no_stale_check=True)
+
+    p = sub.add_parser("config", help="show or change settings for this project")
+    p.add_argument("assign", nargs="*", metavar="key=value")
+    p.add_argument("--global", dest="scope", action="store_const", const="global",
+                   default="project", help="write to the global config instead of this project")
+    p.add_argument("--unset", nargs="+", metavar="key")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_config, no_stale_check=True)
 
     p = sub.add_parser("refresh", help="reindex when the index store has moved on")
     p.add_argument("--all", action="store_true", help="every registered project")

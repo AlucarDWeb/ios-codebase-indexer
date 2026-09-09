@@ -240,7 +240,7 @@ def main():
     ap.add_argument("--root", help="project root (default: detected from the cwd)")
     ap.add_argument("--store", action="append", help="repeatable; defaults to every detected store")
     ap.add_argument("--db")
-    ap.add_argument("--jobs", type=int, default=max(2, (os.cpu_count() or 4) - 2))
+    ap.add_argument("--jobs", type=int, help="parallel workers (default: config jobs)")
     ap.add_argument("--limit-records", type=int, default=0)
     ap.add_argument("--include-system", action="store_true")
     ap.add_argument("--viz", dest="viz", action="store_true", default=None,
@@ -249,8 +249,8 @@ def main():
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
-    cfg = prj.load_config()
     root = os.path.realpath(args.root) if args.root else prj.find_root()
+    cfg = prj.effective_config(root)
     detected, prefix_map = prj.detect_stores(root)
     stores = args.store or detected
     if not stores:
@@ -261,6 +261,7 @@ def main():
     # Build into a scratch file and swap it in, so queries keep hitting the old graph
     # for the whole build instead of an empty one.
     db_path = final_db + ".building"
+    jobs = args.jobs or cfg.get("jobs", 4)
     shard_dir = db_path + ".shards"
     os.makedirs(shard_dir, exist_ok=True)
     for f in os.listdir(shard_dir):
@@ -284,10 +285,10 @@ def main():
     batch = [(v[0], r, v[1], v[2]) for r, v in records.items() if args.include_system or not v[3]]
     if args.limit_records:
         batch = batch[:args.limit_records]
-    print(f"extracting {len(batch)} records with {args.jobs} workers", flush=True)
-    shard_paths = [os.path.join(shard_dir, f"s{i}.db") for i in range(args.jobs)]
-    with ProcessPoolExecutor(args.jobs) as ex:
-        list(ex.map(scan_records, shard_paths, chunks(batch, args.jobs)))
+    print(f"extracting {len(batch)} records with {jobs} workers", flush=True)
+    shard_paths = [os.path.join(shard_dir, f"s{i}.db") for i in range(jobs)]
+    with ProcessPoolExecutor(jobs) as ex:
+        list(ex.map(scan_records, shard_paths, chunks(batch, jobs)))
     print(f"extract done ({time.time()-t0:.1f}s)", flush=True)
 
     if os.path.exists(db_path):
@@ -415,7 +416,9 @@ def main():
         import sqlite3 as _sq
         vdb = _sq.connect(f"file:{db_path}?mode=ro", uri=True)
         vdb.row_factory = _sq.Row
-        data = viz.slice_data(vdb, scope=None, limit=1500, edge_cap=30000, per_node_cap=25)
+        data = viz.slice_data(vdb, scope=cfg.get("viz_scope") or None,
+                              limit=cfg.get("viz_limit", 1500), edge_cap=30000,
+                              per_node_cap=cfg.get("viz_per_node_cap", 25))
         html = os.path.join(os.path.dirname(db_path),
                             os.path.basename(db_path).replace(".db", "-explorer.html"))
         viz.render(data, html)

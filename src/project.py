@@ -9,22 +9,111 @@ CONFIG = os.path.join(CONFIG_DIR, "config.json")
 DEFAULT_CONFIG = {
     "auto_refresh_on_query": False,   # rebuild inline when a query hits a stale graph
     "viz_on_build": True,             # regenerate the HTML explorer after every build
-    "poll_minutes": 15,               # autoindex daemon interval
+    "viz_limit": 1500,                # symbols in the repo-wide explorer slice
+    "viz_per_node_cap": 25,           # edges kept per symbol per direction
+    "viz_scope": "",                  # module or path glob the explorer defaults to
+    "poll_minutes": 15,               # autoindex agent interval (global only)
     "jobs": max(2, (os.cpu_count() or 4) - 2),
+    "claude_md_path": "",             # where init writes the agent note (blank = CLAUDE.md)
 }
+
+GLOBAL_ONLY = ("poll_minutes",)
+
+CONFIG_HELP = {
+    "auto_refresh_on_query": "reindex inline when a query finds the graph stale",
+    "viz_on_build": "regenerate the HTML explorer after every build",
+    "viz_limit": "symbols in the repo-wide explorer slice (0 = all)",
+    "viz_per_node_cap": "edges kept per symbol per direction in the explorer",
+    "viz_scope": "module name or path glob the explorer defaults to",
+    "poll_minutes": "autoindex agent interval, global only",
+    "jobs": "parallel extractor workers",
+    "claude_md_path": "where init writes the agent note (blank = <project>/CLAUDE.md)",
+}
+
+
+def coerce(key, raw):
+    """Parse a command-line value against the type of the default."""
+    default = DEFAULT_CONFIG.get(key)
+    if isinstance(default, bool):
+        low = str(raw).strip().lower()
+        if low in ("true", "yes", "on", "1"):
+            return True
+        if low in ("false", "no", "off", "0"):
+            return False
+        raise ValueError(f"{key} expects a boolean, got {raw!r}")
+    if isinstance(default, int):
+        try:
+            return int(raw)
+        except ValueError:
+            raise ValueError(f"{key} expects an integer, got {raw!r}")
+    return str(raw)
+
+
+def effective_config(root=None, with_source=False):
+    """Defaults, overlaid with the global file, overlaid with this project's overrides."""
+    merged = {k: (v, "default") for k, v in DEFAULT_CONFIG.items()}
+    for k, v in _read_json(CONFIG).items():
+        merged[k] = (v, "global")
+    if root:
+        over = (load_registry().get(os.path.realpath(root), {}).get("config") or {})
+        for k, v in over.items():
+            if k in GLOBAL_ONLY:
+                continue
+            merged[k] = (v, "project")
+    if with_source:
+        return merged
+    return {k: v for k, (v, _) in merged.items()}
+
+
+def set_config(key, value, root=None):
+    """Write one key to the project override (default) or the global file."""
+    if key not in DEFAULT_CONFIG:
+        raise ValueError(f"unknown key {key!r}; known keys: {', '.join(sorted(DEFAULT_CONFIG))}")
+    val = coerce(key, value)
+    if root and key not in GLOBAL_ONLY:
+        reg = load_registry()
+        rr = os.path.realpath(root)
+        entry = reg.setdefault(rr, {})
+        entry.setdefault("config", {})[key] = val
+        save_registry(reg)
+        return "project", val
+    cfg = _read_json(CONFIG)
+    cfg[key] = val
+    save_config(cfg)
+    return "global", val
+
+
+def unset_config(key, root=None):
+    if root:
+        reg = load_registry()
+        rr = os.path.realpath(root)
+        over = reg.get(rr, {}).get("config") or {}
+        if key in over:
+            del over[key]
+            save_registry(reg)
+            return "project"
+    cfg = _read_json(CONFIG)
+    if key in cfg:
+        del cfg[key]
+        save_config(cfg)
+        return "global"
+    return None
+
+
+def _read_json(path):
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            pass
+    return {}
 
 MARKERS = (".sourcekit-lsp", "buildServer.json", "Package.swift", ".git", "MODULE.bazel", "WORKSPACE")
 
 
-def load_config():
-    cfg = dict(DEFAULT_CONFIG)
-    if os.path.exists(CONFIG):
-        try:
-            with open(CONFIG) as f:
-                cfg.update(json.load(f))
-        except (OSError, ValueError):
-            pass
-    return cfg
+def load_config(root=None):
+    return effective_config(root)
 
 
 def save_config(cfg):
