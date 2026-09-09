@@ -10,8 +10,9 @@ SERVER = {"name": "codebase-brain", "version": idxg.VERSION}
 
 TOOLS = [
     {"name": "index_status",
-     "description": "Index-store graph status: counts, edge kinds, build time, and how much of the "
-                    "repo the compiled index actually covers. Call this first in a session.",
+     "description": "Index-store graph status: counts, edge kinds, build time, how much of the repo "
+                    "the compiled index actually covers, the history db, and whether a newer "
+                    "codebase-brain release exists. Call this first in a session.",
      "inputSchema": {"type": "object", "properties": {"db": {"type": "string"}}}},
     {"name": "search_graph",
      "description": "Find symbols by full-text query (BM25 over camel-split names), name regex, kind, "

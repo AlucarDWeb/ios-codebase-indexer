@@ -213,7 +213,9 @@ def cmd_status(a):
     if recounted:
         cache_summary(a.db, counts, per_kind, tracked, covered)
     if a.json:
+        tag, url = prj.update_available(VERSION)
         print(json.dumps({"meta": m, "counts": counts, "history": _history_status(a.db),
+                          "version": VERSION, "update_available": tag, "release_url": url,
                           "edges_by_kind": {r["kind"]: r["c"] for r in per_kind},
                           "files_in_repo": in_repo, "swift_symbols": swift,
                           "coverage": {"tracked_sources": tracked, "covered": covered,
@@ -239,6 +241,9 @@ def cmd_status(a):
     hist_line = _history_status(a.db)
     if hist_line:
         print(f"\nhistory: {hist_line}")
+    tag, url = prj.update_available(VERSION)
+    if tag:
+        print(f"\nupdate:  codebase-brain {tag} is available (installed {VERSION}). run `idxg update`  {url}")
 
 
 def _history_status(db_arg):
@@ -950,6 +955,45 @@ def cmd_history_digest(a):
         print(f"\n... truncated at {budget:,} of {len(text):,} bytes (raise --max-bytes, or --json for the data)")
     else:
         print(text)
+
+
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def cmd_update(a):
+    """Pull the latest release into the checkout this CLI runs from, then reinstall links."""
+    tag, url = prj.update_available(VERSION, force=True)
+    latest = prj.latest_release(force=False).get("tag") or "unknown"
+    print(f"installed: {VERSION}   latest release: {latest}")
+    if a.check:
+        if tag:
+            print(f"update available: {tag}  {url}\nrun `idxg update` to install it")
+        else:
+            print("up to date")
+        return
+    if not tag and not a.force:
+        print("up to date; pass --force to pull anyway")
+        return
+    if not os.path.isdir(os.path.join(REPO_DIR, ".git")):
+        raise SystemExit(f"{REPO_DIR} is not a git checkout; update it the way you installed it")
+    dirty = subprocess.run(["git", "-C", REPO_DIR, "status", "--porcelain"], capture_output=True, text=True).stdout
+    if dirty.strip():
+        raise SystemExit(f"{REPO_DIR} has uncommitted changes; commit or discard them, then run idxg update")
+    branch = subprocess.run(["git", "-C", REPO_DIR, "rev-parse", "--abbrev-ref", "HEAD"],
+                            capture_output=True, text=True).stdout.strip()
+    print(f"pulling {branch} in {REPO_DIR}")
+    r = subprocess.run(["git", "-C", REPO_DIR, "pull", "--ff-only", "--tags"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit(f"git pull failed: {(r.stderr or r.stdout).strip()[:400]}")
+    print((r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else "pulled")
+    install = os.path.join(REPO_DIR, "install.sh")
+    if os.path.exists(install):
+        r = subprocess.run(["sh", install], capture_output=True, text=True)
+        print(r.stdout.strip().splitlines()[0] if r.stdout.strip() else "install.sh ran")
+    now = subprocess.run([sys.executable, os.path.join(REPO_DIR, "src", "idxg.py"), "--version"],
+                         capture_output=True, text=True).stdout.strip()
+    print(f"now: {now}")
+    print("restart Claude Code so the MCP server picks up the new code; graphs and history need no rebuild")
 
 
 def cmd_history_vault(a):
@@ -1800,6 +1844,11 @@ def build_parser():
     p = sub.add_parser("projects", help="list indexed projects and whether they are fresh")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_projects, no_stale_check=True)
+
+    p = sub.add_parser("update", help="pull the latest release and reinstall")
+    p.add_argument("--check", action="store_true", help="only report whether a newer release exists")
+    p.add_argument("--force", action="store_true", help="pull even when no newer release is known")
+    p.set_defaults(fn=cmd_update, no_stale_check=True)
 
     p = sub.add_parser("open", help="open the HTML explorer for this project")
     p.set_defaults(fn=cmd_open, no_stale_check=True)

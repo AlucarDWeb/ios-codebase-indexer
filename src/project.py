@@ -46,9 +46,10 @@ DEFAULT_CONFIG = {
     "history_vault": "",              # default directory for idxg history vault (blank = beside the db)
     "history_prs": True,              # fetch pull request descriptions through gh when it is logged in
     "viz_history_weeks": 26,          # weekly digests embedded in the explorer
+    "update_check": True,             # ask GitHub once a day whether a newer release exists (global only)
 }
 
-GLOBAL_ONLY = ("poll_minutes",)
+GLOBAL_ONLY = ("poll_minutes", "update_check")
 
 CONFIG_HELP = {
     "auto_refresh_on_query": "reindex inline when a query finds the graph stale",
@@ -66,6 +67,7 @@ CONFIG_HELP = {
     "history_vault": "where idxg history vault writes by default (blank = <db dir>/<project>-vault)",
     "history_prs": "fetch pull request descriptions through gh (needs gh auth login)",
     "viz_history_weeks": "how many weekly digests the explorer embeds",
+    "update_check": "check GitHub once a day for a newer release, global only",
 }
 
 
@@ -342,3 +344,47 @@ def git_root(path):
     r = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel"],
                        capture_output=True, text=True)
     return r.stdout.strip() or None
+
+
+RELEASES_API = "https://api.github.com/repos/AlucarDWeb/codebase-brain/releases/latest"
+RELEASES_URL = "https://github.com/AlucarDWeb/codebase-brain/releases"
+UPDATE_CACHE = os.path.join(CONFIG_DIR, "update.json")
+
+
+def _version_tuple(v):
+    return tuple(int(x) for x in str(v).lstrip("v").split("-")[0].split(".") if x.isdigit())
+
+
+def latest_release(force=False, ttl_hours=24):
+    """The newest release on GitHub as {tag, url, published, checked_at}, from a cache that is
+    refreshed at most once a day. Returns {} when disabled, offline, or rate limited."""
+    if not force and not effective_config().get("update_check", True):
+        return {}
+    cached = _read_json(UPDATE_CACHE)
+    if not force and cached.get("checked_at", 0) > time.time() - ttl_hours * 3600:
+        return cached
+    import urllib.request
+    try:
+        req = urllib.request.Request(RELEASES_API, headers={"Accept": "application/vnd.github+json",
+                                                            "User-Agent": "codebase-brain"})
+        with urllib.request.urlopen(req, timeout=4) as r:
+            data = json.loads(r.read().decode())
+        info = {"tag": data.get("tag_name", ""), "url": data.get("html_url", RELEASES_URL),
+                "published": (data.get("published_at") or "")[:10], "checked_at": time.time()}
+    except Exception:
+        info = dict(cached, checked_at=time.time()) if cached else {}
+        if not info:
+            return {}
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(UPDATE_CACHE, "w") as f:
+        json.dump(info, f)
+    return info
+
+
+def update_available(current, force=False):
+    """(tag, url) of a newer release than `current`, else (None, None)."""
+    info = latest_release(force=force)
+    tag = info.get("tag")
+    if tag and _version_tuple(tag) > _version_tuple(current):
+        return tag, info.get("url", RELEASES_URL)
+    return None, None

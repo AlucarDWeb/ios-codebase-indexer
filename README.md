@@ -337,6 +337,15 @@ caveats to respect.
   factual log. Tags come from subjects and labels: a fix whose title lacks the word is
   untagged.
 
+## Updating
+
+`idxg status` (and the MCP `index_status` tool) asks GitHub at most once a day whether a
+newer release exists and prints a line when one does. `idxg update --check` asks now.
+`idxg update` pulls the release into the checkout the CLI runs from and re-runs
+`install.sh`; graphs and history databases need no rebuild afterwards, but a running
+Claude Code session needs a restart to pick up the new MCP server code. Turn the daily
+check off with `idxg config --global update_check=false`.
+
 ## Removing a project
 
 ```bash
