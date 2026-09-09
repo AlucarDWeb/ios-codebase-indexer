@@ -349,15 +349,6 @@ idxg deinit --purge    # also delete the graph, the history db, the explorer, di
 `--force`, and never touches a vault you pointed `history_vault` at. The launchd agent is
 per machine rather than per project; `idxg autoindex --uninstall` removes it.
 
-## Upgrading from ios-codebase-indexer
-
-This tool was called `ios-codebase-indexer` until September 2026. The CLI is still `idxg`.
-The first run after upgrading moves `~/.config/ios-codebase-indexer` and
-`~/.cache/indexstore-graph` to `~/.config/codebase-brain` and `~/.cache/codebase-brain`.
-Running `idxg init` in an already indexed project replaces the old CLAUDE.md block and
-project skill with the new ones, keeping anything you wrote under `## Project notes`.
-`install.sh` removes the old skill link and MCP registration.
-
 ## How it works
 
 - `src/idxstore.py` binds `libIndexStore.dylib` through ctypes: units, records,
