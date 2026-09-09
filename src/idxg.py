@@ -6,6 +6,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import project as prj
 import deadcode
 
+VERSION = "0.1.0"
+
 KIND_BOOST = {"Function": 10, "InstanceMethod": 10, "ClassMethod": 10, "StaticMethod": 10,
               "Constructor": 8, "Class": 5, "Struct": 5, "Protocol": 5, "Enum": 5, "Extension": 3}
 EDGE_KINDS = ["CALLS", "REFERENCES", "CONTAINS", "INHERITS", "OVERRIDES", "EXTENDS",
@@ -1593,6 +1595,7 @@ def cmd_autoindex(a):
 
 def build_parser():
     ap = argparse.ArgumentParser(prog="idxg", description="codebase-brain: a code graph, its history and its docs")
+    ap.add_argument("--version", action="version", version=f"codebase-brain {VERSION}")
     ap.add_argument("--db", help="graph db path (default ~/.cache/codebase-brain/<project>.db)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 

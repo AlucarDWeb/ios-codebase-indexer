@@ -6,7 +6,7 @@ from contextlib import redirect_stdout
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import idxg
 
-SERVER = {"name": "codebase-brain", "version": "0.1.0"}
+SERVER = {"name": "codebase-brain", "version": idxg.VERSION}
 
 TOOLS = [
     {"name": "index_status",
