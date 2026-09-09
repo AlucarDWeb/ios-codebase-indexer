@@ -37,6 +37,10 @@ TOOLS = [
          "edge_kinds": {"type": "string", "default": "CALLS",
                         "description": "CALLS,REFERENCES,CONTAINS,INHERITS,OVERRIDES,EXTENDS,ACCESSOR_OF"},
          "first": {"type": "boolean", "default": True, "description": "take best match instead of listing"},
+         "max_rows": {"type": "integer", "default": 120,
+                      "description": "cap printed rows; a wide trace is truncated with a note"},
+         "max_bytes": {"type": "integer", "default": 8000,
+                       "description": "cap the payload size of one call"},
          "db": {"type": "string"}},
          "required": ["symbol"]}},
     {"name": "find_references",
@@ -50,6 +54,7 @@ TOOLS = [
                     "brace-balanced extent.",
      "inputSchema": {"type": "object", "properties": {
          "symbol": {"type": "string"}, "max_lines": {"type": "integer", "default": 200},
+         "max_bytes": {"type": "integer", "default": 6000},
          "db": {"type": "string"}}, "required": ["symbol"]}},
     {"name": "query_graph",
      "description": "Read-only SQL over the graph. Tables: symbols(usr_hash,usr,name,kind,lang,module,"
@@ -70,6 +75,31 @@ TOOLS = [
      "description": "Layers, modules by symbol count, cross-module call hotspots, and build targets.",
      "inputSchema": {"type": "object", "properties": {
          "limit": {"type": "integer", "default": 20}, "db": {"type": "string"}}}},
+    {"name": "find_dead_code",
+     "description": "Symbols nothing in the indexed build reaches: no call, no reference, no "
+                    "override, no occurrence beyond their own definition. Structural edges are "
+                    "ignored, and synthesis-driven members, protocol witnesses, IB outlets, entry "
+                    "points, vendored trees and ObjC are excluded by default. Pass verify to "
+                    "cross-check each candidate with a text search. Bounded by index coverage: "
+                    "report survivors as candidates to check, never as unused code.",
+     "inputSchema": {"type": "object", "properties": {
+         "module": {"type": "string"}, "kind": {"type": "string", "description": "comma list"},
+         "verify": {"type": "boolean", "description": "drop candidates named in another file"},
+         "include_tests": {"type": "boolean"}, "include_vendor": {"type": "boolean"},
+         "lang": {"type": "string", "enum": ["Swift", "ObjC", "C", "any"]},
+         "limit": {"type": "integer", "default": 100}, "offset": {"type": "integer", "default": 0},
+         "db": {"type": "string"}}}},
+    {"name": "refresh_index",
+     "description": "Reindex the project when the compiler's index store has moved on, which it "
+                    "does after any build. Takes minutes on a large repo, so call it when a trace "
+                    "looks stale rather than routinely; index_status reports staleness for free.",
+     "inputSchema": {"type": "object", "properties": {
+         "force": {"type": "boolean", "description": "reindex even when nothing changed"},
+         "db": {"type": "string"}}}},
+    {"name": "list_projects",
+     "description": "Every indexed project on this machine, with symbol counts and whether each "
+                    "graph is fresh or behind its index store.",
+     "inputSchema": {"type": "object", "properties": {}}},
     {"name": "get_schema",
      "description": "Full db schema plus the edge-kind and occurrence-role vocabulary.",
      "inputSchema": {"type": "object", "properties": {"db": {"type": "string"}}}},
@@ -81,7 +111,7 @@ TOOLS = [
          "db": {"type": "string"}}}},
 ]
 
-DEFAULTS = {"json": False, "db": None}
+DEFAULTS = {"json": False, "db": None, "exact": False, "no_stale_check": True}
 
 
 def ns(**kw):
@@ -111,17 +141,32 @@ def call(name, a):
     if name == "trace_path":
         return run(idxg.cmd_trace, ns(db=db, symbol=a["symbol"], direction=a.get("direction", "both"),
                                       depth=a.get("depth", 2), fanout=a.get("fanout", 25),
-                                      kind=a.get("edge_kinds", "CALLS"), first=a.get("first", True)))
+                                      kind=a.get("edge_kinds", "CALLS"), first=a.get("first", True),
+                                      max_rows=a.get("max_rows", 120),
+                                      max_bytes=a.get("max_bytes", 8000)))
     if name == "find_references":
         return run(idxg.cmd_refs, ns(db=db, symbol=a["symbol"], limit=a.get("limit", 200)))
     if name == "get_code_snippet":
-        return run(idxg.cmd_snippet, ns(db=db, symbol=a["symbol"], max_lines=a.get("max_lines", 200)))
+        return run(idxg.cmd_snippet, ns(db=db, symbol=a["symbol"], max_lines=a.get("max_lines", 200),
+                                        max_bytes=a.get("max_bytes", 6000)))
     if name == "query_graph":
         return run(idxg.cmd_sql, ns(db=db, query=a["query"], limit=a.get("limit", 200)))
     if name == "check_index_coverage":
         return run(idxg.cmd_coverage, ns(db=db, paths=a["paths"]))
     if name == "get_architecture":
         return run(idxg.cmd_arch, ns(db=db, limit=a.get("limit", 20)))
+    if name == "find_dead_code":
+        return run(idxg.cmd_dead, ns(db=db, module=a.get("module"), kind=a.get("kind"),
+                                     verify=bool(a.get("verify")),
+                                     include_tests=bool(a.get("include_tests")),
+                                     include_vendor=bool(a.get("include_vendor")),
+                                     lang=a.get("lang", "Swift"), limit=a.get("limit", 100),
+                                     offset=a.get("offset", 0)))
+    if name == "refresh_index":
+        return run(idxg.cmd_refresh, ns(db=db, all=False, force=bool(a.get("force")),
+                                        jobs=None, verbose=False))
+    if name == "list_projects":
+        return run(idxg.cmd_projects, ns(db=None))
     if name == "get_schema":
         return run(idxg.cmd_schema, ns(db=db))
     if name == "build_visualizer":

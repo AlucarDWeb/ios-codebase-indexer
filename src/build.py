@@ -1,5 +1,5 @@
 """Build a queryable SQLite graph from a Swift/clang index store."""
-import argparse, hashlib, json, os, sqlite3, sys, time
+import argparse, hashlib, json, os, sqlite3, subprocess, sys, time
 from ctypes import c_uint, c_void_p, byref
 from concurrent.futures import ProcessPoolExecutor
 
@@ -402,6 +402,27 @@ def main():
     db.commit()
     stats = {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
              for t in ("symbols", "edges", "occurrences", "defs", "files", "units")}
+    # Counting 6M edge rows takes seconds, and coverage needs a git listing, so both are
+    # measured once here and read back from meta instead of on every status call.
+    for name, value in stats.items():
+        db.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (f"count_{name}", str(value)))
+    tracked = covered = 0
+    try:
+        listing = subprocess.run(["git", "-C", root, "ls-files", "-z", "*.swift", "*.m",
+                                  "*.h", "*.mm", "*.c", "*.cpp"],
+                                 capture_output=True, text=True).stdout.split("\0")
+        files = [f for f in listing if f]
+        have = {r[0] for r in db.execute("SELECT rel FROM files WHERE in_repo = 1 AND rel IS NOT NULL")}
+        tracked = len(files)
+        covered = sum(1 for f in files if f in have)
+    except OSError:
+        pass
+    db.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("coverage_tracked", str(tracked)))
+    db.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("coverage_covered", str(covered)))
+    db.execute("INSERT OR REPLACE INTO meta VALUES(?,?)",
+               ("edge_kinds", json.dumps(dict(db.execute(
+                   "SELECT kind, COUNT(*) FROM edges GROUP BY kind ORDER BY 2 DESC").fetchall()))))
+    db.commit()
     db.close()
     for suffix in ("-wal", "-shm"):
         leftover = db_path + suffix

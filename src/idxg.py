@@ -91,6 +91,31 @@ def meta(db):
     return {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM meta")}
 
 
+REGEX_META = set(".^$*+?()[]{}|\\") | set("[]")
+
+
+def literal_name_filter(pattern):
+    """Translate ^Foo$ / ^Foo / Foo$ into an indexable comparison, else (None, None).
+
+    GLOB, not LIKE: SQLite's LIKE is case-insensitive for ASCII, which would return more
+    than the equivalent regex and quietly disagree with the slow path.
+    """
+    anchored_start = pattern.startswith("^")
+    anchored_end = pattern.endswith("$") and not pattern.endswith("\\$")
+    body = pattern[1:] if anchored_start else pattern
+    if anchored_end:
+        body = body[:-1]
+    if not body or REGEX_META & set(body):
+        return None, None
+    if anchored_start and anchored_end:
+        return "s.name = ?", body
+    if anchored_start:
+        return "s.name GLOB ?", body + "*"
+    if anchored_end:
+        return "s.name GLOB ?", "*" + body
+    return "s.name GLOB ?", f"*{body}*"
+
+
 def roles_str(mask):
     return "|".join(n for b, n in ROLE_BITS if mask & b) or str(mask)
 
@@ -157,23 +182,37 @@ def sym_line(db, r, show_qn=True):
 def cmd_status(a):
     db = connect(a.db)
     m = meta(db)
-    counts = {t: db.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"]
-              for t in ("symbols", "edges", "occurrences", "defs", "files", "units")}
-    per_kind = db.execute("""SELECT kind, COUNT(*) c FROM edges GROUP BY kind ORDER BY c DESC""").fetchall()
+    tables = ("symbols", "edges", "occurrences", "defs", "files", "units")
+    cached = all(f"count_{t}" in m for t in tables) and not a.exact
+    if cached:
+        counts = {t: int(m[f"count_{t}"]) for t in tables}
+    else:
+        counts = {t: db.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] for t in tables}
+    if m.get("edge_kinds") and not a.exact:
+        per_kind = [{"kind": k, "c": v} for k, v in json.loads(m["edge_kinds"]).items()]
+    else:
+        per_kind = db.execute("SELECT kind, COUNT(*) c FROM edges GROUP BY kind ORDER BY c DESC").fetchall()
     in_repo = db.execute("SELECT COUNT(*) c FROM files WHERE in_repo = 1").fetchone()["c"]
-    swift = db.execute("SELECT COUNT(*) c FROM symbols WHERE lang='Swift'").fetchone()["c"]
+    stamp = "" if a.exact else "  (counts as of the last build; --exact recounts)"
+    swift = int(m.get("count_swift_symbols") or 0) or db.execute(
+        "SELECT COUNT(*) c FROM symbols WHERE lang='Swift'").fetchone()["c"]
     root = m.get("repo_root", "")
-    tracked = covered = 0
-    if os.path.isdir(root):
-        import subprocess
+    tracked = int(m.get("coverage_tracked") or 0)
+    covered = int(m.get("coverage_covered") or 0)
+    recounted = not cached
+    if (not tracked or a.exact) and os.path.isdir(root):
+        recounted = True
         out = subprocess.run(["git", "-C", root, "ls-files", "-z", "*.swift", "*.m", "*.h", "*.mm",
                               "*.c", "*.cpp"], capture_output=True, text=True).stdout.split("\0")
         out = [f for f in out if f]
         tracked = len(out)
         have = {r["rel"] for r in db.execute("SELECT rel FROM files WHERE in_repo = 1")}
         covered = sum(1 for f in out if f in have)
+    if recounted:
+        cache_summary(a.db, counts, per_kind, tracked, covered)
     if a.json:
-        print(json.dumps({"meta": m, "counts": counts, "edges_by_kind": {r["kind"]: r["c"] for r in per_kind},
+        print(json.dumps({"meta": m, "counts": counts,
+                          "edges_by_kind": {r["kind"]: r["c"] for r in per_kind},
                           "files_in_repo": in_repo, "swift_symbols": swift,
                           "coverage": {"tracked_sources": tracked, "covered": covered,
                                        "pct": round(100 * covered / tracked, 1) if tracked else None}}, indent=2))
@@ -183,7 +222,7 @@ def cmd_status(a):
     print(f"store:     {m.get('store_path')}")
     print(f"built:     {m.get('built_at')}  (format v{m.get('format_version')}, {m.get('build_seconds')}s)")
     print(f"db:        {db_path(a.db)}  ({os.path.getsize(db_path(a.db))/1e9:.2f} GB)")
-    print("\ncounts")
+    print(f"\ncounts{stamp}")
     for k, v in counts.items():
         print(f"  {k:<12} {v:>10,}")
     print(f"  {'swift syms':<12} {swift:>10,}")
@@ -195,6 +234,28 @@ def cmd_status(a):
         print(f"\ncoverage: {covered:,}/{tracked:,} tracked sources have index records "
               f"({100*covered/tracked:.1f}%)")
         print("  a file with no records was never compiled in the indexed build; grep it instead.")
+
+
+def cache_summary(db_arg, counts, per_kind, tracked, covered):
+    """Persist the expensive summaries so later calls read them instead of recounting.
+
+    Best effort: a read-only volume or a concurrent build just means the next call
+    recounts again.
+    """
+    try:
+        w = sqlite3.connect(db_path(db_arg))
+        with w:
+            for name, value in counts.items():
+                w.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (f"count_{name}", str(value)))
+            kinds = {(r["kind"] if not isinstance(r, dict) else r["kind"]):
+                     (r["c"] if not isinstance(r, dict) else r["c"]) for r in per_kind}
+            w.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("edge_kinds", json.dumps(kinds)))
+            if tracked:
+                w.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("coverage_tracked", str(tracked)))
+                w.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("coverage_covered", str(covered)))
+        w.close()
+    except sqlite3.Error:
+        pass
 
 
 def cmd_coverage(a):
@@ -246,7 +307,13 @@ def cmd_search(a):
     db = connect(a.db)
     where, args = [], []
     if a.name:
-        where.append("regexp(?, s.name)"); args.append(a.name)
+        # An anchored literal is by far the most common pattern an agent sends, and it can
+        # use the name index instead of running the regex over every symbol.
+        sql, val = literal_name_filter(a.name)
+        if sql:
+            where.append(sql); args.append(val)
+        else:
+            where.append("regexp(?, s.name)"); args.append(a.name)
     if a.kind:
         ks = a.kind.split(",")
         where.append("s.kind IN (%s)" % ",".join("?" * len(ks))); args += ks
@@ -359,17 +426,24 @@ def cmd_trace(a):
         tree[d] = walk(root["usr_hash"], 1)
     if a.json:
         print(json.dumps(tree, indent=2)); return
+    printed = [0]
+    spent = [0]
     loc = f"{tree['file']}:{tree['line']}" if tree["file"] else "external"
     print(f"{tree['symbol']}  [{tree['kind']}]  {loc}")
     print(f"edges: {','.join(kinds)}  depth: {a.depth}")
 
     def show(nodes, prefix=""):
         for i, n in enumerate(nodes):
+            if printed[0] >= a.max_rows or spent[0] >= a.max_bytes:
+                return
             last = i == len(nodes) - 1
             branch = "└─ " if last else "├─ "
             site = f"  {n['sites'][0]}" if n["sites"] else ""
             extra = f" (x{n['site_count']})" if n["site_count"] > 1 else ""
-            print(f"{prefix}{branch}{n['name']}  {n['kind']} <{n['edge']}>{site}{extra}")
+            line = f"{prefix}{branch}{n['name']}  {n['kind']} <{n['edge']}>{site}{extra}"
+            print(line)
+            printed[0] += 1
+            spent[0] += len(line) + 1
             show(n["children"], prefix + ("   " if last else "│  "))
 
     for d in directions:
@@ -377,7 +451,12 @@ def cmd_trace(a):
         print(f"\n{label}:")
         if not tree[d]:
             print("  (none)")
+        before = printed[0]
         show(tree[d])
+        if printed[0] >= a.max_rows or spent[0] >= a.max_bytes:
+            why = "rows" if printed[0] >= a.max_rows else "size"
+            print(f"  ... truncated on {why} ({printed[0]} rows, {spent[0]} bytes). Narrow with "
+                  f"--fanout / --depth / --kind, or raise --max-rows / --max-bytes")
 
 
 def cmd_refs(a):
@@ -429,8 +508,15 @@ def cmd_snippet(a):
     if not opened:
         end = min(len(lines) - 1, start + 2)
     print(f"{rel(db, r['def_path_hash'])}:{r['def_line']}  [{r['kind']} {r['name']}]")
+    spent = 0
     for i in range(start, end + 1):
-        print(f"{i+1:6}  {lines[i]}")
+        out = f"{i+1:6}  {lines[i]}"
+        if spent + len(out) > a.max_bytes:
+            print(f"  ... truncated at {i - start} lines / {spent} bytes "
+                  f"(raise with --max-bytes)")
+            break
+        print(out)
+        spent += len(out) + 1
 
 
 def cmd_sql(a):
@@ -1071,7 +1157,10 @@ def build_parser():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("status", help="index status + coverage summary")
-    p.add_argument("--json", action="store_true"); p.set_defaults(fn=cmd_status)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--exact", action="store_true",
+                   help="recount rows instead of reading the values cached at build time")
+    p.set_defaults(fn=cmd_status)
 
     p = sub.add_parser("coverage", help="check which paths the index actually covers")
     p.add_argument("paths", nargs="+"); p.add_argument("--json", action="store_true")
@@ -1095,6 +1184,10 @@ def build_parser():
     p.add_argument("--depth", type=int, default=2); p.add_argument("--fanout", type=int, default=25)
     p.add_argument("--kind", default="CALLS", help="edge kinds, comma list (%s)" % ",".join(EDGE_KINDS))
     p.add_argument("--first", action="store_true", help="use the best match instead of listing candidates")
+    p.add_argument("--max-rows", type=int, default=120,
+                   help="cap printed rows so a wide trace stays readable (default 120)")
+    p.add_argument("--max-bytes", type=int, default=8000,
+                   help="cap printed bytes, keeping one call affordable for an agent")
     p.add_argument("--json", action="store_true"); p.set_defaults(fn=cmd_trace)
 
     p = sub.add_parser("refs", help="every occurrence of a symbol with roles")
@@ -1103,6 +1196,8 @@ def build_parser():
 
     p = sub.add_parser("snippet", help="print a symbol's definition from disk")
     p.add_argument("symbol"); p.add_argument("--max-lines", type=int, default=200)
+    p.add_argument("--max-bytes", type=int, default=6000,
+                   help="cap printed bytes for a large definition (default 6000)")
     p.set_defaults(fn=cmd_snippet)
 
     p = sub.add_parser("sql", help="read-only SQL over the graph")

@@ -100,6 +100,10 @@ directory's name.
 - **`idxg viz` size scales with the slice.** Repo-wide defaults to the top 1500 symbols
   by degree; `--scope <Module>` includes every symbol in that module. Keep
   `--per-node-cap` near 14 to stay under ~8 MB.
+- **Keep calls cheap.** `trace_path` caps rows and bytes and tells you when it truncated;
+  narrow with `--fanout`, `--depth` or `--kind` rather than raising the caps. An anchored
+  literal `--name '^Foo$'` is an indexed lookup, a general regex scans every symbol.
+  `idxg status` reads counts cached at build time, so it is cheap to call first.
 - `usr_hash` is a 64-bit blake2 of the USR and is the primary key everywhere. Join on it,
   and use `usr` when you need the stable compiler identity.
 
