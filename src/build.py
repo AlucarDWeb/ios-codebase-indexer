@@ -463,7 +463,9 @@ def main():
             history.build(root, db_path, branch=cfg.get("history_branch") or None,
                           first_parent=cfg.get("history_first_parent", True),
                           prs=cfg.get("history_prs", True), manifest_path=_manifest(root, cfg))
-        except SystemExit as e:
+        except Exception as e:
+            # The graph is already swapped in; a history failure must not fail the build
+            # or leave its lock behind.
             print(f"history skipped: {e}", file=sys.stderr)
     if args.viz if args.viz is not None else cfg.get("viz_on_build", True):
         import viz

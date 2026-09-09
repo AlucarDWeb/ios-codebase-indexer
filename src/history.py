@@ -35,6 +35,8 @@ CREATE INDEX IF NOT EXISTS ix_commits_pr ON commits(pr);
 CREATE INDEX IF NOT EXISTS ix_docs_module ON docs(module);
 """
 
+COMMIT_INSERT = """INSERT OR REPLACE INTO commits(sha, short, parents, author, email, authored, committed, day,
+  month, subject, body, pr, tickets, files, ins, del, seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
 # Columns added after the first release; _migrate adds them to an older history db.
 COMMIT_EXTRA = (("pr_title", "TEXT"), ("pr_body", "TEXT"), ("pr_labels", "TEXT"), ("pr_merged", "TEXT"),
                 ("pr_author", "TEXT"))
@@ -424,12 +426,12 @@ def build(root, graph_db, branch=None, first_parent=True, full=False, since=None
                 frows.append((rec["sha"], path, old, i, d, module, component,
                               os.path.splitext(path)[1].lstrip(".").lower()))
             if len(crows) >= 2000:
-                db.executemany("INSERT OR REPLACE INTO commits VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", crows)
+                db.executemany(COMMIT_INSERT, crows)
                 db.executemany("INSERT INTO commit_files VALUES(?,?,?,?,?,?,?,?)", frows)
                 db.commit()
                 crows, frows = [], []
                 log(f"  {n:,} commits ({time.time() - t0:.0f}s)")
-        db.executemany("INSERT OR REPLACE INTO commits VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", crows)
+        db.executemany(COMMIT_INSERT, crows)
         db.executemany("INSERT INTO commit_files VALUES(?,?,?,?,?,?,?,?)", frows)
         db.commit()
     log(f"  commits added: {n:,} ({time.time() - t0:.1f}s)")
