@@ -381,8 +381,8 @@ function selectModule(i) {
   }
   info.append(kv);
   const g = el('div', 'grid2');
-  g.append(edgeList(`${name} calls into`, outs, l => l.t, 'var(--warn)'));
-  g.append(edgeList(`calls into ${name}`, ins, l => l.s, 'var(--accent)'));
+  g.append(modTree(`callers (inbound)`, ins, l => l.s, 'var(--accent)'));
+  g.append(modTree(`callees (outbound)`, outs, l => l.t, 'var(--warn)'));
   info.append(g);
   const jump = el('div');
   const b = el('a', null, `browse ${name} symbols`);
@@ -390,6 +390,31 @@ function selectModule(i) {
   b.onclick = () => { showTab('symbols'); setModule(name); };
   jump.style.marginTop = '10px'; jump.append(b);
   info.append(jump);
+}
+
+function modTree(title, rows, pick, color) {
+  const c = el('div');
+  const h = el('h2', null, `${title}: ${rows.length}`); h.style.color = color;
+  c.append(h);
+  if (!rows.length) { c.append(el('div', 'empty', '(none)')); return c; }
+  const pre = el('div', 'tree');
+  const shown = rows.slice(0, 40);
+  shown.forEach((l, i) => {
+    const other = modState.names[pick(l)];
+    const last = i === shown.length - 1;
+    const line = el('div');
+    line.append(document.createTextNode(last ? '\u2514\u2500 ' : '\u251c\u2500 '));
+    const a = el('a', null, other);
+    a.onclick = () => selectModule(modState.idx.get(other));
+    line.append(a);
+    const tail = el('span', 'loc',
+      `  Module <CALLS>  ${fmt(modState.size.get(other) || 0)} symbols (x${fmt(l.n)})`);
+    line.append(tail);
+    pre.append(line);
+  });
+  if (rows.length > shown.length) pre.append(el('div', 'loc', `... ${rows.length - shown.length} more`));
+  c.append(pre);
+  return c;
 }
 
 function edgeList(title, rows, pick, color) {

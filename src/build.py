@@ -5,6 +5,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import idxstore as ix
+import project as prj
 
 SKIP_KINDS = {25, 1000}  # Parameter, CommentTag
 
@@ -229,32 +230,6 @@ def normalize(path, root, prefix_map):
     return p, None, 0
 
 
-def detect_stores(root):
-    """Every index store that describes this checkout: the BSP one plus the plain bazel build's."""
-    found, pm = [], {}
-    cfg = os.path.join(root, ".sourcekit-lsp", "config.json")
-    if os.path.exists(cfg):
-        with open(cfg) as f:
-            data = json.load(f)
-        pm = (data.get("index") or {}).get("indexPrefixMap") or {}
-        bo = pm.get("./bazel-out")
-        if bo:
-            bsp = os.path.join(bo, "_global_index_store")
-            if os.path.isdir(bsp):
-                found.append(bsp)
-            plain = os.path.join(bo.replace("/sourcekit-bazel-bsp/execroot/", "/execroot/"),
-                                 "_global_index_store")
-            if plain != bsp and os.path.isdir(plain):
-                found.append(plain)
-    for cand in (os.path.join(root, ".index-build", "index"),
-                 os.path.expanduser("~/.sourcekit-lsp/index-build")):
-        if os.path.isdir(cand) and cand not in found:
-            found.append(cand)
-    if not found:
-        raise SystemExit("could not locate an index store; pass --store")
-    return found, pm
-
-
 def chunks(seq, n):
     k = max(1, (len(seq) + n - 1) // n)
     return [seq[i:i + k] for i in range(0, len(seq), k)]
@@ -262,19 +237,30 @@ def chunks(seq, n):
 
 def main():
     ap = argparse.ArgumentParser(prog="idxg-build")
-    ap.add_argument("--root", default=os.getcwd())
+    ap.add_argument("--root", help="project root (default: detected from the cwd)")
     ap.add_argument("--store", action="append", help="repeatable; defaults to every detected store")
     ap.add_argument("--db")
     ap.add_argument("--jobs", type=int, default=max(2, (os.cpu_count() or 4) - 2))
     ap.add_argument("--limit-records", type=int, default=0)
     ap.add_argument("--include-system", action="store_true")
+    ap.add_argument("--viz", dest="viz", action="store_true", default=None,
+                    help="regenerate the HTML explorer after building (default: config viz_on_build)")
+    ap.add_argument("--no-viz", dest="viz", action="store_false")
+    ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
-    root = os.path.realpath(args.root)
-    detected, prefix_map = detect_stores(root)
+    cfg = prj.load_config()
+    root = os.path.realpath(args.root) if args.root else prj.find_root()
+    detected, prefix_map = prj.detect_stores(root)
     stores = args.store or detected
-    slug = os.path.basename(root)
-    db_path = args.db or os.path.expanduser(f"~/.cache/indexstore-graph/{slug}.db")
+    if not stores:
+        raise SystemExit(f"no index store found for {root}; pass --store, or build the project "
+                         f"once so the compiler writes one")
+    final_db = args.db or prj.db_for(root)
+    os.makedirs(os.path.dirname(final_db), exist_ok=True)
+    # Build into a scratch file and swap it in, so queries keep hitting the old graph
+    # for the whole build instead of an empty one.
+    db_path = final_db + ".building"
     shard_dir = db_path + ".shards"
     os.makedirs(shard_dir, exist_ok=True)
     for f in os.listdir(shard_dir):
@@ -401,11 +387,13 @@ def main():
     db.execute("CREATE INDEX ix_fts_map ON fts_map(usr_hash)")
     db.executescript("DROP TABLE _sym; DROP TABLE _files;")
     for k, v in {
-        "store_path": " ; ".join(stores), "repo_root": root, "project": slug,
+        "store_path": " ; ".join(stores), "repo_root": root, "project": os.path.basename(root.rstrip("/")),
         "format_version": str(ix.lib.indexstore_format_version()),
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "prefix_map": json.dumps(prefix_map), "build_seconds": f"{time.time()-t0:.1f}",
         "units": str(len(all_units)), "records": str(len(batch)),
+        "stores": json.dumps(stores),
+        "store_signature": json.dumps(prj.store_signature(stores)),
     }.items():
         db.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (k, v))
     db.commit()
@@ -413,8 +401,28 @@ def main():
     db.commit()
     stats = {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
              for t in ("symbols", "edges", "occurrences", "defs", "files", "units")}
-    print(json.dumps({"db": db_path, "seconds": round(time.time() - t0, 1), **stats}, indent=2))
     db.close()
+    for suffix in ("-wal", "-shm"):
+        leftover = db_path + suffix
+        if os.path.exists(leftover):
+            os.remove(leftover)
+    os.replace(db_path, final_db)
+    db_path = final_db
+    prj.register(root, db_path, stores, {"symbols": stats["symbols"], "edges": stats["edges"]})
+    html = None
+    if args.viz if args.viz is not None else cfg.get("viz_on_build", True):
+        import viz
+        import sqlite3 as _sq
+        vdb = _sq.connect(f"file:{db_path}?mode=ro", uri=True)
+        vdb.row_factory = _sq.Row
+        data = viz.slice_data(vdb, scope=None, limit=1500, edge_cap=30000, per_node_cap=25)
+        html = os.path.join(os.path.dirname(db_path),
+                            os.path.basename(db_path).replace(".db", "-explorer.html"))
+        viz.render(data, html)
+        vdb.close()
+        prj.register(root, db_path, stores, {"html": html})
+    print(json.dumps({"project": root, "db": db_path, "html": html,
+                      "seconds": round(time.time() - t0, 1), **stats}, indent=2))
     for f in os.listdir(shard_dir):
         os.remove(os.path.join(shard_dir, f))
     os.rmdir(shard_dir)
