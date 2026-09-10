@@ -104,7 +104,8 @@ roles: `CALLS` (calledBy), `REFERENCES` (containedBy), `CONTAINS` (childOf), `IN
 - **The old name must keep working for anyone who installed it.** `project.py` moves the
   legacy config and cache directories on import and rewrites registry paths; `idxg init`
   and `deinit` recognise the `ios-codebase-indexer` CLAUDE.md markers and the
-  `codebase-index` project skill (carrying its Project notes over); `autoindex` unloads the
+  `codebase-index` and `codebase-brain` project skills (the per-project skill is `project-brain`,
+  so it never shares a name with the global one; Project notes carry over); `autoindex` unloads the
   old launchd label; `install.sh` removes the old skill link and MCP registration. Remove
   these paths only with a release note that says which version dropped them.
 - **Nothing may assume one repository's layout.** Layers are derived from path segments,
