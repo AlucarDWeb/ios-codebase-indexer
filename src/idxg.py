@@ -1178,8 +1178,10 @@ LEGACY_CLAUDE_START = "<!-- ios-codebase-indexer:start -->"
 LEGACY_CLAUDE_END = "<!-- ios-codebase-indexer:end -->"
 LAUNCH_LABEL = "com.codebase-brain.autoindex"
 LEGACY_LAUNCH_LABEL = "com.ios-codebase-indexer.autoindex"
-PROJECT_SKILL = "codebase-brain"
-LEGACY_PROJECT_SKILL = "codebase-index"
+# The per-project skill gets its own name so it never collides with the global skill
+# installed under ~/.claude/skills/codebase-brain.
+PROJECT_SKILL = "project-brain"
+LEGACY_PROJECT_SKILLS = ("codebase-index", "codebase-brain")
 NOTES_MARKER = "## Project notes"
 
 
@@ -1228,9 +1230,10 @@ def install_project_skill(root, db_file):
     name = m.get("project") or os.path.basename(root)
     d = os.path.join(root, ".claude", "skills", PROJECT_SKILL)
     os.makedirs(d, exist_ok=True)
-    _remove_skill_dir(os.path.join(root, ".claude", "skills", LEGACY_PROJECT_SKILL), keep_notes_into=d)
+    for legacy in LEGACY_PROJECT_SKILLS:
+        _remove_skill_dir(os.path.join(root, ".claude", "skills", legacy), keep_notes_into=d)
     body = f"""---
-name: codebase-brain
+name: project-brain
 description: Query {name}'s compiler-accurate code graph, its commit history and its own docs instead of grepping. Use for who calls X, what X calls, where X is referenced, override and conformance chains, module coupling, dead-code candidates, or any structural question about this codebase. Also covers refreshing the index after a build.
 ---
 
@@ -1345,7 +1348,7 @@ idxg docs search "<words>"                    # the repo's own docs, full text
 
 The graph reflects the last compile, so refresh after building, and treat a file with no
 index records as unproven rather than unused. Details and caveats live in
-`.claude/skills/codebase-brain/SKILL.md`. Missing `idxg`? Install it from
+`.claude/skills/project-brain/SKILL.md`. Missing `idxg`? Install it from
 https://github.com/AlucarDWeb/codebase-brain and run `idxg init` here.
 {CLAUDE_END}"""
     path = target or os.path.join(root, "CLAUDE.md")
@@ -1377,7 +1380,7 @@ def cmd_deinit(a):
     entry = reg.get(root, {})
     removed, kept = [], []
 
-    for skill_dir in (PROJECT_SKILL, LEGACY_PROJECT_SKILL):
+    for skill_dir in (PROJECT_SKILL,) + LEGACY_PROJECT_SKILLS:
         skill = os.path.join(root, ".claude", "skills", skill_dir, "SKILL.md")
         if not os.path.exists(skill):
             continue

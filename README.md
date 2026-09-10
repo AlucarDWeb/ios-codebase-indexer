@@ -27,7 +27,7 @@ would need only a second extractor writing the same tables.
 ## How an agent uses it
 
 `./install.sh` registers the MCP server with Claude Code, and `idxg init` in a project
-writes two things into it: a project skill (`.claude/skills/codebase-brain/SKILL.md`) that
+writes two things into it: a project skill (`.claude/skills/project-brain/SKILL.md`) that
 says when to reach for the graph instead of grep and which caveats to respect, and a block
 in the project's CLAUDE.md that points at it. From then on the agent picks the tools by
 itself. Nothing in the agent's prompt needs to change.
