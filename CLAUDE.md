@@ -17,6 +17,7 @@ the CLI stayed `idxg`.
 | `src/viz.py` | 1161 | HTML explorer: data slicing and the whole page as one Python string |
 | `src/deadcode.py` | 98 | dead-code candidate query and its text cross-check |
 | `src/history.py` | 1513 | git log, PR descriptions (via `gh`) and repo docs into `<project>-history.db`; module attribution via the graph; per-commit narration, weekly digest, timeline, vault export |
+| `src/crash.py` | ~170 | stack trace parsing (Apple, lldb, free text), frame resolution by file:line or name, callers, since-date for a git ref |
 | `src/templates/weekly-digest.html` | | the knowledge vault's fixed digest layout, copied verbatim; only `{{TITLE}}` and `{{DIGEST_JSON}}` are substituted |
 | `src/mcp_server.py` | 333 | stdio MCP server wrapping the CLI functions |
 | `bench/bench_mcp.py` | | latency and payload size per MCP tool |
@@ -117,6 +118,9 @@ roles: `CALLS` (calledBy), `REFERENCES` (containedBy), `CONTAINS` (childOf), `IN
 - **PR descriptions are optional enrichment, never required.** `enrich_prs` runs only when
   `gh auth status` succeeds and the origin is GitHub; every reader must cope with
   `pr_body` being NULL (not fetched) or `''` (fetched, PR gone).
+- **Crash triage never guesses a type.** `crash._by_name` returns nothing when the trace
+  names a type the graph lacks, instead of another type's method of the same name; a
+  bare trace line counts as a frame only when it carries a file and line or a call.
 - **The vault export is append-only.** `_write_clipping` never rewrites a file; a changed
   source becomes a date-suffixed clipping and the state file records which. That is the
   contract the knowledge vaults compile from, so a re-run must produce zero new files when

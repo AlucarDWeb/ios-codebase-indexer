@@ -996,6 +996,95 @@ def cmd_update(a):
     print("restart Claude Code so the MCP server picks up the new code; graphs and history need no rebuild")
 
 
+def cmd_crash(a):
+    """Map a stack trace onto the graph and the history: symbol, callers and recent commits per frame."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import crash
+    text = a.text if getattr(a, "text", None) else (sys.stdin.read() if a.trace == "-" else open(a.trace).read())
+    db = connect(a.db)
+    m = meta(db)
+    root = m.get("repo_root", "")
+    hist = _history_module()
+    hp = hist.history_db_for(db_path(a.db))
+    hdb = hist.connect(hp) if os.path.exists(hp) else None
+    since = crash.since_date(root, a.since) if a.since else None
+    if a.since and not since:
+        raise SystemExit(f"--since {a.since!r} is neither a date nor a git ref in {root}")
+    frames = crash.parse(text)
+    resolved, skipped_system, unresolved = [], 0, []
+    for fr in frames:
+        if crash.is_system(fr):
+            skipped_system += 1
+            continue
+        sym, how = crash.resolve_frame(db, fr)
+        if not sym:
+            unresolved.append(fr)
+            continue
+        entry = {"frame": fr["index"], "raw": fr["raw"], "symbol": sym["name"], "kind": sym["kind"],
+                 "module": sym["module"], "file": sym["rel"], "def_line": sym["def_line"],
+                 "trace_line": fr["line"], "resolved_by": how,
+                 "callers": [dict(r) for r in crash.callers(db, sym["usr_hash"], a.callers)], "commits": []}
+        if hdb and sym["rel"]:
+            rows = hist.commits_for(hdb, paths=[sym["rel"]], since=since, limit=a.commits)
+            entry["commits"] = [dict(r) for r in rows]
+        resolved.append(entry)
+        if len(resolved) >= a.frames:
+            break
+    if getattr(a, "json", False):
+        print(json.dumps({"frames_total": len(frames), "system_frames": skipped_system, "since": since,
+                          "resolved": resolved, "unresolved": [f["raw"] for f in unresolved]}, indent=1))
+        return
+    web = hist.meta(hdb).get("remote_web", "") if hdb else ""
+    print(f"{len(frames)} frames parsed, {skipped_system} in system images, {len(resolved)} resolved to this repo"
+          + (f", {len(unresolved)} unresolved" if unresolved else "")
+          + (f"; commits since {since}" if since else "; commits: most recent")
+          + ("" if hdb else "; no history db (idxg history build)"))
+    if not resolved:
+        print("nothing in this trace resolves to indexed code. Check idxg coverage for the files named, "
+              "and that the trace is symbolicated.")
+        return
+    spent, budget = 0, a.max_bytes
+    for e in resolved:
+        block = [f"\n#{e['frame']}  {e['symbol']}  {e['kind']}  {e['module'] or ''}",
+                 f"    {e['file']}:{e['def_line']}" + (f"  (trace line {e['trace_line']})" if e["trace_line"] else "")
+                 + f"  resolved by {e['resolved_by']}"]
+        if e["callers"]:
+            block.append(f"    callers ({len(e['callers'])} shown):")
+            for c in e["callers"]:
+                site = f"{(c['rel'] or '').split('/')[-1]}:{c['line']}" if c["rel"] else ""
+                block.append(f"      {c['name']}  {c['module'] or ''}  {site}" + (f"  (x{c['n']})" if c["n"] > 1 else ""))
+        else:
+            block.append("    callers: none in the indexed build (entry point, dynamic dispatch, or uncompiled caller)")
+        if hdb:
+            if e["commits"]:
+                block.append(f"    commits touching {e['file'].split('/')[-1]}" + (f" since {since}" if since else "") + ":")
+                for c in e["commits"]:
+                    pr = f"  #{c['pr']}" if c["pr"] else ""
+                    subject = hist.PR_RE.sub("", c["subject"]).strip()[:90]
+                    block.append(f"      {c['day']}  {c['short']}  {subject}{pr}  ({c['author']})")
+            else:
+                block.append(f"    commits touching {e['file'].split('/')[-1]}" + (f" since {since}" if since else "") + ": none")
+        text = "\n".join(block)
+        if spent + len(text) > budget:
+            print(f"\n... {budget:,} byte budget reached; raise --max-bytes or lower --frames")
+            break
+        print(text)
+        spent += len(text)
+    if unresolved and spent < budget:
+        print(f"\nunresolved ({len(unresolved)}):")
+        for f in unresolved[:8]:
+            print(f"  {f['raw'][:110]}")
+    hot = [e for e in resolved if e["commits"]]
+    if hdb and hot:
+        latest = max(hot, key=lambda e: e["commits"][0]["day"])
+        c = latest["commits"][0]
+        print(f"\nmost recently changed frame: {latest['symbol']} in {latest['file'].split('/')[-1]}, "
+              f"{c['day']} {c['short']} {hist.PR_RE.sub('', c['subject']).strip()[:80]}"
+              + (f"  {web}/pull/{c['pr']}" if web and c["pr"] else ""))
+    print("this is what changed near the crash, not why it crashed; read the callers and the PR bodies "
+          "(idxg history show) before deciding.")
+
+
 def cmd_history_vault(a):
     hist = _history_module()
     graph = db_path(a.db)
@@ -1173,6 +1262,7 @@ idxg history log --module <Module> --since 2026-01-01
 idxg history log --narrate --since <date>      # one paragraph per commit: who, what, why
 idxg history show #<PR>                        # one change in full: PR description, files, modules
 idxg history digest [--week 2026-W36]          # the week, every change narrated, by area
+idxg crash <trace> --since <release tag>       # per frame: symbol, callers, commits since the tag
 idxg history churn --by module                 # where change concentrated this year
 idxg history timeline                          # the project's history in prose
 idxg docs search "<words>"                     # the repo's own markdown docs, full text
@@ -1199,6 +1289,8 @@ USR; ambiguous names list candidates unless you pass `--first`.
   "why was this done", read the commit body with `idxg history show`.
 - Repo docs are the tracked markdown files; `published` is a file's last commit date,
   not the date its content is true. Prefer the code graph when the two disagree.
+- For a crash, run `idxg crash` first, then read the PR bodies it lists with
+  `idxg history show`. It shows what changed near the crash, never why it crashed.
 
 Largest modules: {', '.join(mods[:12])}.
 
@@ -1844,6 +1936,16 @@ def build_parser():
     p = sub.add_parser("projects", help="list indexed projects and whether they are fresh")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_projects, no_stale_check=True)
+
+    p = sub.add_parser("crash", help="triage a stack trace: symbol, callers and recent commits per frame")
+    p.add_argument("trace", help="file with the symbolicated trace, or - for stdin")
+    p.add_argument("--since", help="only commits after this date (YYYY-MM-DD) or git ref, e.g. a release tag")
+    p.add_argument("--frames", type=int, default=6, help="in-repo frames to expand (default 6)")
+    p.add_argument("--callers", type=int, default=5)
+    p.add_argument("--commits", type=int, default=5)
+    p.add_argument("--max-bytes", type=int, default=12000)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_crash)
 
     p = sub.add_parser("update", help="pull the latest release and reinstall")
     p.add_argument("--check", action="store_true", help="only report whether a newer release exists")

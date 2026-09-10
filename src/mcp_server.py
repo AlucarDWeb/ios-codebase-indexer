@@ -142,6 +142,19 @@ TOOLS = [
          "week": {"type": "string", "description": "ISO week, e.g. 2026-W36"},
          "since": {"type": "string"}, "until": {"type": "string"},
          "max_bytes": {"type": "integer", "default": 16000}, "db": {"type": "string"}}}},
+    {"name": "triage_crash",
+     "description": "Map a symbolicated stack trace (Apple crash report, lldb backtrace, Sentry frames, or "
+                    "any text with Type.method(labels:) and File.swift:line) onto the graph and the "
+                    "history. For each in-repo frame: the symbol and its definition, its callers with call "
+                    "sites, and the commits that touched its file since a date or release tag, with PR "
+                    "numbers. Then read the PR bodies with get_commit. This gathers what changed near the "
+                    "crash; it does not know why it crashed.",
+     "inputSchema": {"type": "object", "properties": {
+         "trace": {"type": "string", "description": "the stack trace text"},
+         "since": {"type": "string", "description": "YYYY-MM-DD or a git ref such as the previous release tag"},
+         "frames": {"type": "integer", "default": 6}, "callers": {"type": "integer", "default": 5},
+         "commits": {"type": "integer", "default": 5}, "max_bytes": {"type": "integer", "default": 12000},
+         "db": {"type": "string"}}, "required": ["trace"]}},
     {"name": "get_churn",
      "description": "Where change concentrates: commits, lines and authors per module, component "
                     "directory, file or author over a window (default the last 365 days).",
@@ -267,6 +280,10 @@ def call(name, a):
     if name == "get_commit":
         return run(idxg.cmd_history_show, ns(db=db, sha=a["sha"], max_files=a.get("max_files", 80),
                                              max_body=a.get("max_body", 4000)))
+    if name == "triage_crash":
+        return run(idxg.cmd_crash, ns(db=db, trace=None, text=a["trace"], since=a.get("since"),
+                                      frames=a.get("frames", 6), callers=a.get("callers", 5),
+                                      commits=a.get("commits", 5), max_bytes=a.get("max_bytes", 12000)))
     if name == "get_churn":
         return run(idxg.cmd_history_churn, ns(db=db, since=a.get("since"), by=a.get("by", "module"),
                                               ext=a.get("ext"), limit=a.get("limit", 25)))

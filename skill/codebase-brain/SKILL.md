@@ -1,6 +1,6 @@
 ---
 name: codebase-brain
-description: Query a Swift/ObjC code graph built from the compiler's own index store, with exact call and reference edges, plus the project's commit history and its own markdown docs. Use for "who calls X", "what does X call", "where is X referenced", callers of a protocol requirement, override chains, cross-module call weights, or any structural question where a tree-sitter graph or grep would guess; and for "who changed X and why", "when did module Y appear", "what changed in Z this quarter", "what does the repo's documentation say about W". Also covers building and refreshing the graph, the history db, the HTML explorer and the knowledge-vault export.
+description: Query a Swift/ObjC code graph built from the compiler's own index store, with exact call and reference edges, plus the project's commit history and its own markdown docs. Use for "who calls X", "what does X call", "where is X referenced", callers of a protocol requirement, override chains, cross-module call weights, or any structural question where a tree-sitter graph or grep would guess; and for "who changed X and why", "when did module Y appear", "what changed in Z this quarter", "what does the repo's documentation say about W", and for triaging a crash report or stack trace (per frame: symbol, callers, commits since the last release). Also covers building and refreshing the graph, the history db, the HTML explorer and the knowledge-vault export.
 ---
 
 # codebase-brain (idxg)
@@ -27,6 +27,7 @@ relation. Prefer it over grep for structure, and over a parser-derived graph alw
 | where change concentrates, hotspots by churn | `idxg history churn` |
 | how the project evolved, when something appeared or went away | `idxg history timeline` |
 | what the repo's own docs say (README, CLAUDE.md, design docs) | `idxg docs search`, `idxg docs list --module M` |
+| a crash report or stack trace to triage | `idxg crash <trace> --since <previous release tag>` (MCP `triage_crash`) |
 
 ## Commands
 
@@ -57,6 +58,7 @@ idxg history timeline --periods 4                     # prose, newest periods
 idxg docs search "dependency injection"
 idxg docs list --module MyModule
 idxg docs show Documentation/Testing.md --max-bytes 8000
+idxg crash crash.txt --since v1.328.0                 # per frame: symbol, callers, commits since the tag
 idxg history build                                    # pull new commits, resync docs
 idxg history vault --out <vault dir>                  # clippings for a knowledge vault
 idxg deinit --purge                                   # un-index a project completely
@@ -132,6 +134,20 @@ directory's name.
 - `usr_hash` is a 64-bit blake2 of the USR and is the primary key everywhere. Join on it,
   and use `usr` when you need the stable compiler identity.
 
+## Crash triage
+
+`idxg crash <file|->` (MCP `triage_crash` with the trace text) parses Apple crash reports,
+lldb backtraces, Sentry frames or any text carrying `Type.method(labels:)` and
+`File.swift:line`. Frames in system images are skipped. Each in-repo frame is resolved by
+file and line when the trace has them, else by name (a type the graph does not know is
+left unresolved rather than guessed), and printed with its definition, its callers with
+call sites, and the commits touching its file since `--since` (a date or a git ref such as
+the previous release tag). Then read the PR bodies with `idxg history show`.
+
+It reports what changed near the crash, not why it crashed. The graph has no runtime data
+and no expression-level detail, so a force unwrap, a race or a nil is invisible to it.
+Treat the output as the list of places and pull requests to read first.
+
 ## History and docs
 
 - **History is `git log --first-parent` of the history branch** (`main`, then `master`,
@@ -171,5 +187,6 @@ Tools: `index_status`, `search_graph`, `trace_path`, `find_references`,
 `get_code_snippet`, `query_graph`, `check_index_coverage`, `get_architecture`,
 `get_schema`, `build_visualizer`; history and docs: `get_history`, `get_commit`,
 `get_churn`, `get_timeline`, `get_digest`, `list_docs`, `search_docs`, `get_doc`,
-`refresh_history`. `get_history` with `narrate: true` gives one paragraph per commit. The server resolves the database from the session's
+`refresh_history`; crash triage: `triage_crash`. `get_history` with `narrate: true` gives
+one paragraph per commit. The server resolves the database from the session's
 working directory; pass `db` to override.

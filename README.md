@@ -1,7 +1,8 @@
 # codebase-brain
 
-A brain for a codebase, for people and for coding agents. It holds three things about a
-project in one place:
+A brain for a codebase that coding agents can query. It holds three things about a
+project in one place and serves them as MCP tools, as a CLI (`idxg`), and as an HTML
+explorer:
 
 - the code graph the compiler already knows: every symbol, call, reference, override and
   conformance it resolved, each with the exact `file:line`;
@@ -9,15 +10,124 @@ project in one place:
   merge;
 - the repository's own documentation, searchable by content.
 
-Editors get "jump to definition" from the compiler's index store. codebase-brain turns the
-same data into a SQLite graph with a CLI (`idxg`), an MCP server for agents, and a
-self-contained HTML explorer. Because the edges come from the compiler, "who calls this"
-returns the calls that were actually resolved, with no parsing and no guessing about
-generics or dynamic dispatch.
+An agent working in the repository does not grep for "who calls this" or guess "why was
+this changed". It calls `trace_path` and gets the resolved call sites; it calls
+`get_history` with `narrate` and gets the pull requests that touched the file, in prose;
+it pastes a crash report into `triage_crash` and gets, per frame, the symbol, its callers
+and what changed there since the last release. Every answer is computed from the compiler,
+git and GitHub, and every payload is capped so a call stays affordable.
 
-Today it reads Swift, Objective-C, C and C++ through the compiler's index store. The
-history and docs layers do not depend on the language, and another language would need
-only a second extractor writing the same tables.
+Editors get "jump to definition" from the compiler's index store; codebase-brain turns the
+same data into a SQLite graph. Because the edges come from the compiler, "who calls this"
+returns the calls that were actually resolved, with no parsing and no guessing about
+generics or dynamic dispatch. Today it reads Swift, Objective-C, C and C++ through that
+store. The history and docs layers do not depend on the language, and another language
+would need only a second extractor writing the same tables.
+
+## How an agent uses it
+
+`./install.sh` registers the MCP server with Claude Code, and `idxg init` in a project
+writes two things into it: a project skill (`.claude/skills/codebase-brain/SKILL.md`) that
+says when to reach for the graph instead of grep and which caveats to respect, and a block
+in the project's CLAUDE.md that points at it. From then on the agent picks the tools by
+itself. Nothing in the agent's prompt needs to change.
+
+The tools, by the question they answer:
+
+| Question | Tool | Same thing on the CLI |
+|---|---|---|
+| Is the graph fresh, what does it cover, is there a newer release | `index_status` | `idxg status` |
+| Find a symbol by words, regex, kind, module, file | `search_graph` | `idxg search` |
+| Who calls this, what does it call, override and conformance chains | `trace_path` | `idxg trace` |
+| Every use of a symbol with read, write, call roles | `find_references` | `idxg refs` |
+| The definition, read from disk | `get_code_snippet` | `idxg snippet` |
+| Any SQL over the graph | `query_graph` | `idxg sql` |
+| Was this file compiled at all (before claiming "unused") | `check_index_coverage` | `idxg coverage` |
+| Layers, modules, cross-module hotspots | `get_architecture` | `idxg arch` |
+| Candidates nothing reaches | `find_dead_code` | `idxg dead` |
+| Who changed this, when, in which PR, and why | `get_history` (`narrate`) | `idxg history log --narrate` |
+| One commit or PR in full: description, files, modules | `get_commit` | `idxg history show` |
+| Where change concentrates | `get_churn` | `idxg history churn` |
+| How the project evolved, period by period | `get_timeline` | `idxg history timeline` |
+| What shipped this week, every change narrated by area | `get_digest` | `idxg history digest` |
+| A crash report: per frame, symbol, callers, commits since a release | `triage_crash` | `idxg crash` |
+| The repo's own docs: list, full-text search, read one | `list_docs`, `search_docs`, `get_doc` | `idxg docs` |
+| Rebuild when the graph or history is behind | `refresh_index`, `refresh_history` | `idxg refresh`, `idxg history build` |
+| Table and column reference | `get_schema` | `idxg schema` |
+
+A typical crash investigation, as an agent runs it: `triage_crash` with the trace and
+`since` set to the previous release tag; `get_commit` on the two or three PRs it lists, to
+read what they meant to do; `trace_path` on the frame's symbol to see every caller;
+`get_code_snippet` to read the definition. Four calls, all bounded, and every claim
+traceable to a compiler edge or a commit.
+
+Payloads are budgeted. `trace_path`, `get_history`, `triage_crash` and `get_doc` cap rows
+and bytes and say when they truncated, so the agent narrows the question rather than the
+tool flooding the context. `index_status` reads counts cached at build time and is cheap
+to call first. The MCP server resolves the database from the session's working directory
+and takes `db` to target another project.
+
+Everything an agent gets, a person gets from the same functions on the CLI, and the
+explorer shows the same data as pages.
+
+## Triage a crash
+
+Paste a crash report and get back, for every frame that lives in your repository, the
+symbol behind it, who calls it, and what changed there since the release you name.
+
+```bash
+idxg crash crash.txt --since v1.328.0
+```
+
+The input can be an Apple crash report, an lldb backtrace, Sentry's frames, or any text
+that carries `Type.method(labels:)` and `File.swift:line`. Mangled Swift names are
+demangled. Given this backtrace:
+
+```
+frame #0: 0x0000000104a1b2c4 Wallapop`SearchReducer.reduce(_:_:) at SearchReducer.swift:80
+frame #1: 0x0000000104a1c000 Wallapop`IconView.apply(viewModel:) at IconView.swift:80
+```
+
+the output is:
+
+```
+2 frames parsed, 0 in system images, 2 resolved to this repo; commits since 2026-08-10
+
+#0  reduce(_:_:)  InstanceMethod  SearchFeature
+    Modules/Feature/SearchFeature/Sources/UI/SearchReducer.swift:62  (trace line 80)  resolved by file:line
+    callers (3 shown):
+      sections(afterFavoriteToggle:)  SearchFeature_Tests  SearchRootViewContentInvalidationSpec.swift:180  (x2)
+      ...
+    commits touching SearchReducer.swift since 2026-08-10:
+      2026-09-04  6149e25a545  [WPA-116102] Hide the location chip when the response carries no location quick filter  #21766  (Anderson da Silva)
+      2026-09-03  8f11f82ef3c  [WPA-116013] Let the backend be the only gate on the location chip  #21754  (Anderson da Silva)
+
+#1  apply(viewModel:)  InstanceMethod  Conchita
+    Conchita/Sources/Foundations/Icons/IconView.swift:75  (trace line 80)  resolved by file:line
+    callers (3 shown):
+      prepareForReuse()  Conchita  ListItem.swift:238  (x4)
+      ...
+    commits touching IconView.swift since 2026-08-10: none
+
+most recently changed frame: reduce(_:_:) in SearchReducer.swift, 2026-09-04 6149e25a545 ...
+this is what changed near the crash, not why it crashed; read the callers and the PR bodies (idxg history show) before deciding.
+```
+
+Frames in system images (UIKit, libswiftCore, libdispatch and the like) are skipped. A
+frame is resolved by file and line when the trace has them, otherwise by name, and a type
+the graph does not know is reported as unresolved rather than matched to another type's
+method of the same name. Callers list product code before tests. `--since` takes a date or
+any git ref, so the previous release tag is the natural value: the commits it lists are
+the ones that could have introduced the crash.
+
+The same thing is one MCP call for an agent: `triage_crash` with the trace text and
+`since`. The agent then reads the pull requests it names with `get_commit`, follows the
+callers with `trace_path`, and reads the definition with `get_code_snippet`. Four bounded
+calls, and every claim in its answer points at a compiler edge or a commit.
+
+What this cannot do, and no static tool can: know why it crashed. The graph has no runtime
+data and no expression-level detail, so a force unwrap, a race or a nil is invisible to
+it. It gives you the places and the pull requests to read first, with the exact lines.
 
 ## Install
 
@@ -148,6 +258,7 @@ idxg coverage Sources/Feature             # what the compiled index actually cov
 idxg sql "SELECT kind, COUNT(*) n FROM symbols WHERE in_repo=1 GROUP BY kind"
 idxg viz --scope MyModule --open          # HTML explorer
 idxg schema                               # tables, edge kinds, role bits
+idxg crash crash.txt --since v1.328.0     # per frame: symbol, callers, commits since the tag
 ```
 
 The history:
@@ -240,6 +351,12 @@ or exactly the include and exclude globs of a JSON manifest named by
 date when it has generated sections, and a module attribution. `idxg docs search` is a
 BM25 full-text search over their content.
 
+### Crash triage
+
+See [Triage a crash](#triage-a-crash) above. `idxg crash` reads a file or `-` for stdin;
+`--frames`, `--callers` and `--commits` set how much of each it prints, `--json` gives the
+data, and `--max-bytes` caps the text the way every other command does.
+
 ### Vault export
 
 `idxg history vault --out <dir>` writes the docs, the period narratives and one note per
@@ -301,16 +418,12 @@ databases join on the repo-relative path. `idxg schema` prints both.
 
 ## For coding agents
 
-The MCP server exposes the graph as `index_status`, `search_graph`, `trace_path`,
-`find_references`, `get_code_snippet`, `query_graph`, `check_index_coverage`,
-`get_architecture`, `get_schema` and `build_visualizer`; the history and docs as
-`get_history` (with `narrate` for one paragraph per commit), `get_commit`, `get_churn`,
-`get_timeline`, `get_digest`, `list_docs`, `search_docs`, `get_doc` and
-`refresh_history`. Every payload is capped and says when it truncated.
-
-The server resolves the database from the session's working directory. The bundled skill
-tells an agent when to reach for the graph or the history instead of grep, and which
-caveats to respect.
+See [How an agent uses it](#how-an-agent-uses-it) above for the tool table and the flow.
+Two things worth adding. The bundled skill in `skill/codebase-brain/SKILL.md` is what an
+agent reads through `~/.claude/skills`; it carries the gotchas (accessors are separate
+symbols, `REFERENCES` is broad, coverage bounds every negative claim). And the project
+skill `idxg init` writes has a `## Project notes` section at the end that is yours:
+project-specific quirks you add there survive every re-init.
 
 ## Limits worth knowing
 
@@ -368,6 +481,7 @@ per machine rather than per project; `idxg autoindex --uninstall` removes it.
 - `src/history.py` extracts `git log`, fetches PR descriptions through `gh`, collects the
   tracked markdown docs, attributes paths to modules through the graph, and writes the
   narration, the digest, the timeline and the vault export.
+- `src/crash.py` parses stack traces and resolves frames to symbols for `idxg crash`.
 - `src/idxg.py` is the CLI and the query layer.
 - `src/viz.py` renders the HTML explorer.
 - `src/mcp_server.py` is a stdio MCP server wrapping the same commands.
