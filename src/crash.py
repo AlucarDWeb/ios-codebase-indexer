@@ -13,6 +13,8 @@ APPLE_RE = re.compile(r"^\s*(\d+)\s+(\S+)\s+0x[0-9a-fA-F]+\s+(.*?)(?:\s\+\s\d+)?
 LLDB_RE = re.compile(r"^\s*#(\d+)\s+0x[0-9a-fA-F]+\s+in\s+(.*?)(?:\s+at\s+(\S+?):(\d+))?\s*$")
 # lldb thread backtrace: "  * frame #1: 0x000104a1c000 Wallapop`Type.method(a:) at File.swift:80"
 FRAME_RE = re.compile(r"^\s*\*?\s*frame\s+#(\d+):\s+0x[0-9a-fA-F]+\s+(\S+?)`(.*?)(?:\s+at\s+(\S+?):(\d+))?\s*$")
+# Sentry's text export: "    at Type.method(a:) (File.swift:80)" or "(<unknown>)"
+SENTRY_RE = re.compile(r"^\s*at\s+(.+?)\s+\(([^()]*)\)\s*$")
 FILE_LINE_RE = re.compile(r"([\w./+-]+\.(?:swift|m|mm|h|c|cpp|cc))\D{0,12}?(\d+)")
 OBJC_RE = re.compile(r"[-+]\[(\w+)(?:\s*\((\w+)\))?\s+([\w:]+)\]")
 SWIFT_RE = re.compile(r"((?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*(?:\([^()]*\))?|[A-Za-z_]\w*\([^()]*\))")
@@ -20,6 +22,12 @@ WRAPPERS = ("closure #", "specialized ", "partial apply for ", "@objc ", "thunk 
             "protocol witness for ", "generic specialization", "reabstraction thunk", "implicit closure #",
             "key path getter for ", "key path setter for ", "variable initialization expression of ",
             "default argument ", "lazy protocol witness table accessor for ", "outlined ")
+# Symbols that belong to the OS even when the trace names no image.
+SYSTEM_SYMBOL_PREFIXES = ("start", "_dispatch", "__CF", "_CF", "CF", "_os_", "__os_", "os_", "objc_", "GSEvent",
+                          "mach_", "__ulock", "_dlock", "voucher_", "firehose_", "nw_", "_pthread", "pthread_",
+                          "UIApplicationMain", "__alm_", "_swift_", "swift_", "$s", "_sigtramp", "__psynch",
+                          "-[UI", "+[UI", "-[NS", "+[NS", "-[_UI", "-[CA", "-[NW", "-[_NS", "___", "block_destroy",
+                          "_Block", "NSData.", "write", "rename", "closure in writeToFileAux", "thunk for closure")
 SYSTEM_IMAGES = ("libswift", "libsystem", "libdispatch", "libobjc", "dyld", "UIKitCore", "UIKit", "Foundation",
                  "CoreFoundation", "CoreGraphics", "GraphicsServices", "QuartzCore", "SwiftUI", "AttributeGraph",
                  "libc++", "CFNetwork", "Combine", "libxpc", "FrontBoardServices", "libclosured")
@@ -68,17 +76,24 @@ def parse(text):
             continue
         m = APPLE_RE.match(line) or None
         image, sym, file, ln, idx = None, None, None, None, None
+        structured = True
         if m:
             idx, image, sym, file, ln = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
         else:
-            m = LLDB_RE.match(line) or FRAME_RE.match(line)
-            if m and m.re is FRAME_RE:
+            m = LLDB_RE.match(line) or FRAME_RE.match(line) or SENTRY_RE.match(line)
+            if m and m.re is SENTRY_RE:
+                sym, loc = m.group(1), m.group(2)
+                fl = FILE_LINE_RE.search(loc)
+                if fl:
+                    file, ln = fl.group(1), fl.group(2)
+            elif m and m.re is FRAME_RE:
                 idx, image, sym, file, ln = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
             elif m:
                 idx, sym, file, ln = m.group(1), m.group(2), m.group(3), m.group(4)
             else:
                 # A bare line counts as a frame only when it names a file and line or a call;
                 # thread headers and queue names would otherwise resolve to random symbols.
+                structured = False
                 fl = FILE_LINE_RE.search(line)
                 if fl:
                     file, ln = fl.group(1), fl.group(2)
@@ -102,7 +117,7 @@ def parse(text):
                 candidates.append({"type": parts[-2] if len(parts) >= 2 else None, "name": name,
                                    "module": parts[0] if len(parts) >= 3 else None})
                 break
-        if not candidates and not file:
+        if not candidates and not file and not structured:
             continue
         frames.append({"index": int(idx) if idx else len(frames), "image": image, "symbol": sym,
                        "file": os.path.basename(file) if file else None, "path_hint": file,
@@ -192,4 +207,9 @@ def since_date(root, since):
 
 def is_system(frame):
     img = frame.get("image") or ""
-    return any(img.startswith(s) for s in SYSTEM_IMAGES)
+    if any(img.startswith(s) for s in SYSTEM_IMAGES):
+        return True
+    if img or frame.get("file"):
+        return False
+    sym = frame.get("symbol") or ""
+    return any(sym.startswith(s) for s in SYSTEM_SYMBOL_PREFIXES)
